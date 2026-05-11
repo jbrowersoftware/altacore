@@ -24,8 +24,16 @@ export type WhereOperators<V> = {
 // Bare null is also accepted (translated to IS NULL) for the same reason.
 export type WhereCondition<V> = V | null | WhereOperators<V>;
 
-export type Where<T> = {
-  [K in keyof T]?: WhereCondition<T[K]>;
+// 'and' and 'or' are reserved group keys at the top level of a Where<T>;
+// columns named `and`/`or` cannot be filtered via the property syntax and must
+// be addressed inside a group instead.
+type ColumnWhere<T> = {
+  [K in keyof T as K extends 'and' | 'or' ? never : K]?: WhereCondition<T[K]>;
+};
+
+export type Where<T> = ColumnWhere<T> & {
+  and?: readonly Where<T>[];
+  or?: readonly Where<T>[];
 };
 
 export type OrderBy<T> = {

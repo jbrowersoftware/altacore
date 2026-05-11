@@ -179,4 +179,100 @@ describe('buildWhere', () => {
       buildWhere<Row>({ id: { in: 1 } }, pg),
     ).toThrow(/expects an array/);
   });
+
+  it('renders an or group joined with sibling column conditions', () => {
+    const r = buildWhere<Row>(
+      {
+        active: true,
+        or: [{ name: { like: 'a%' } }, { age: { gt: 65 } }],
+      },
+      pg,
+    );
+    expect(r.sql).toBe('"active" = $1 AND ("name" LIKE $2 OR "age" > $3)');
+    expect(r.params).toEqual([true, 'a%', 65]);
+  });
+
+  it('renders a standalone or group', () => {
+    const r = buildWhere<Row>(
+      { or: [{ id: 1 }, { id: 2 }, { id: 3 }] },
+      pg,
+    );
+    expect(r.sql).toBe('("id" = $1 OR "id" = $2 OR "id" = $3)');
+    expect(r.params).toEqual([1, 2, 3]);
+  });
+
+  it('renders an and group', () => {
+    const r = buildWhere<Row>(
+      { and: [{ age: { gte: 18 } }, { age: { lte: 65 } }] },
+      pg,
+    );
+    expect(r.sql).toBe('("age" >= $1 AND "age" <= $2)');
+    expect(r.params).toEqual([18, 65]);
+  });
+
+  it('parenthesizes a multi-part AND branch inside an or group', () => {
+    const r = buildWhere<Row>(
+      {
+        or: [
+          { name: { like: 'a%' } },
+          { age: { gt: 65 }, bio: { ne: null } },
+        ],
+      },
+      pg,
+    );
+    expect(r.sql).toBe(
+      '("name" LIKE $1 OR ("age" > $2 AND "bio" IS NOT NULL))',
+    );
+    expect(r.params).toEqual(['a%', 65]);
+  });
+
+  it('nests groups arbitrarily', () => {
+    const r = buildWhere<Row>(
+      {
+        active: true,
+        or: [
+          { name: { like: 'a%' } },
+          { and: [{ age: { gt: 65 } }, { bio: { ne: null } }] },
+        ],
+      },
+      pg,
+    );
+    expect(r.sql).toBe(
+      '"active" = $1 AND ("name" LIKE $2 OR ("age" > $3 AND "bio" IS NOT NULL))',
+    );
+    expect(r.params).toEqual([true, 'a%', 65]);
+  });
+
+  it('continues placeholder numbering past the offset through groups', () => {
+    const r = buildWhere<Row>({ or: [{ id: 1 }, { id: 2 }] }, pg, 5);
+    expect(r.sql).toBe('("id" = $6 OR "id" = $7)');
+    expect(r.params).toEqual([1, 2]);
+  });
+
+  it('skips empty or/and groups', () => {
+    expect(buildWhere<Row>({ id: 1, or: [] }, pg)).toEqual({
+      sql: '"id" = $1',
+      params: [1],
+    });
+    expect(buildWhere<Row>({ id: 1, and: [] }, pg)).toEqual({
+      sql: '"id" = $1',
+      params: [1],
+    });
+  });
+
+  it('skips empty branches within a group', () => {
+    const r = buildWhere<Row>(
+      { or: [{}, { id: 1 }, { id: 2 }] },
+      pg,
+    );
+    expect(r.sql).toBe('("id" = $1 OR "id" = $2)');
+    expect(r.params).toEqual([1, 2]);
+  });
+
+  it('throws when or/and is not an array', () => {
+    expect(() =>
+      // @ts-expect-error testing runtime guard
+      buildWhere<Row>({ or: { id: 1 } }, pg),
+    ).toThrow(/"or" expects an array/);
+  });
 });

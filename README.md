@@ -123,7 +123,34 @@ Each field accepts a bare value (equality) or an operator object. Operators on o
 | `nin`                    | `NOT IN (...)`       | empty array → always-true (`1 = 1`)        |
 | `like`                   | `LIKE`               | string columns only (typed away on others) |
 
-A bare `null` (`{ bio: null }`) translates to `IS NULL`. Top-level `or` / `not` / nested groups are not yet supported.
+A bare `null` (`{ bio: null }`) translates to `IS NULL`. `not` is not yet supported.
+
+### Combining conditions with `and` / `or`
+
+`where` accepts two reserved group keys, `and` and `or`, each taking an array of nested `Where<T>` objects. Group keys sit alongside column conditions; sibling column conditions still AND together, and groups can nest arbitrarily.
+
+```ts
+// "active" = $1 AND ("name" LIKE $2 OR "age" > $3)
+await users.select({
+  where: {
+    active: true,
+    or: [{ email: { like: '%@example.com' } }, { age: { gt: 65 } }],
+  },
+});
+
+// Nested: "active" = $1 AND ("email" LIKE $2 OR ("age" > $3 AND "bio" IS NOT NULL))
+await users.select({
+  where: {
+    active: true,
+    or: [
+      { email: { like: '%@example.com' } },
+      { and: [{ age: { gt: 65 } }, { bio: { ne: null } }] },
+    ],
+  },
+});
+```
+
+Empty groups (`or: []`, `and: []`) and empty branches are skipped, so you can build them conditionally without guarding for the empty case. Because `and` and `or` are reserved group keys, columns literally named `and` or `or` can't be filtered through the property syntax — wrap them in a group instead.
 
 ### Ordering
 

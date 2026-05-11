@@ -63,14 +63,14 @@ function isOperatorObject(value: unknown): value is Record<string, unknown> {
   );
 }
 
-export function buildWhere<T>(
+type BuildOutput = WhereSql & { partCount: number };
+
+function buildInternal<T>(
   where: Where<T> | undefined,
   dialect: SqlDialect,
-  // Offset for placeholder numbering — lets a WHERE clause be appended after
-  // an existing parameter list (e.g. UPDATE's SET clause).
-  offset = 0,
-): WhereSql {
-  if (!where) return { sql: '', params: [] };
+  offset: number,
+): BuildOutput {
+  if (!where) return { sql: '', params: [], partCount: 0 };
 
   const parts: string[] = [];
   const params: unknown[] = [];
@@ -82,6 +82,29 @@ export function buildWhere<T>(
 
   for (const [column, condition] of Object.entries(where)) {
     if (condition === undefined) continue;
+
+    if (column === 'and' || column === 'or') {
+      if (!Array.isArray(condition)) {
+        throw new TypeError(
+          `altacore: "${column}" expects an array of where conditions.`,
+        );
+      }
+      const branchSqls: string[] = [];
+      for (const branch of condition as readonly Where<T>[]) {
+        const sub = buildInternal(branch, dialect, offset + params.length);
+        if (!sub.sql) continue;
+        params.push(...sub.params);
+        // A branch that is itself a multi-part AND must be parenthesized
+        // before being joined under a different operator.
+        branchSqls.push(sub.partCount > 1 ? `(${sub.sql})` : sub.sql);
+      }
+      if (branchSqls.length === 0) continue;
+      const joiner = column === 'and' ? ' AND ' : ' OR ';
+      const combined =
+        branchSqls.length === 1 ? branchSqls[0]! : branchSqls.join(joiner);
+      parts.push(branchSqls.length > 1 ? `(${combined})` : combined);
+      continue;
+    }
 
     const col = dialect.quoteIdentifier(column);
 
@@ -140,5 +163,16 @@ export function buildWhere<T>(
     }
   }
 
-  return { sql: parts.join(' AND '), params };
+  return { sql: parts.join(' AND '), params, partCount: parts.length };
+}
+
+export function buildWhere<T>(
+  where: Where<T> | undefined,
+  dialect: SqlDialect,
+  // Offset for placeholder numbering — lets a WHERE clause be appended after
+  // an existing parameter list (e.g. UPDATE's SET clause).
+  offset = 0,
+): WhereSql {
+  const r = buildInternal(where, dialect, offset);
+  return { sql: r.sql, params: r.params };
 }
