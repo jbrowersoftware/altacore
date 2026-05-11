@@ -239,4 +239,6 @@ npm run format      # prettier --write
 
 ## License
 
-[MIT](LICENSE)
+[Apache 2.0](LICENSE)
+
+Copyright 2026 Jesse Brower. See [NOTICE](NOTICE) for attribution requirements.

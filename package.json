@@ -17,6 +17,7 @@
   "files": [
     "dist",
     "LICENSE",
+    "NOTICE",
     "README.md"
   ],
   "sideEffects": false,
@@ -41,7 +42,7 @@
     "nodejs"
   ],
   "author": "Jesse Brower <jessebrower1@gmail.com>",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "peerDependencies": {
     "mssql": "^10.0.0",
     "mysql2": "^3.0.0",
