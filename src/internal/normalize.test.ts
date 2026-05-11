@@ -10,9 +10,12 @@ describe('nullsToUndefined', () => {
   });
 
   it('leaves non-null values alone', () => {
-    expect(nullsToUndefined({ a: 0, b: '', c: false, d: undefined })).toEqual(
-      { a: 0, b: '', c: false, d: undefined },
-    );
+    expect(nullsToUndefined({ a: 0, b: '', c: false, d: undefined })).toEqual({
+      a: 0,
+      b: '',
+      c: false,
+      d: undefined,
+    });
   });
 
   it('does not recurse into nested objects (JSON columns intact)', () => {

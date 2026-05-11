@@ -24,10 +24,9 @@ export const createMysqlDriver: DriverFactory = (
       }
       // mysql2 types execute() params more strictly than our `unknown[]`;
       // values are runtime-safe, they come from the SQL builder.
-      const [result] = await pool.execute(
-        sqlText,
-        [...params] as unknown as Parameters<typeof pool.execute>[1],
-      );
+      const [result] = await pool.execute(sqlText, [
+        ...params,
+      ] as unknown as Parameters<typeof pool.execute>[1]);
 
       // SELECT returns an array of row packets; INSERT/UPDATE/DELETE returns a
       // ResultSetHeader with affectedRows. Discriminate at runtime.

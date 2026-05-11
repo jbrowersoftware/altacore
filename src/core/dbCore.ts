@@ -1,4 +1,10 @@
 import type { Database } from './database.js';
+import {
+  buildDelete,
+  buildInsert,
+  buildSelect,
+  buildUpdate,
+} from '../internal/sql.js';
 
 export type WhereOperators<V> = {
   eq?: V;
@@ -18,10 +24,16 @@ export type Where<T> = {
   [K in keyof T]?: WhereCondition<T[K]>;
 };
 
+export type OrderBy<T> = {
+  col: keyof T & string;
+  direction?: 'asc' | 'desc';
+};
+
 export type SelectOptions<T> = {
   where?: Where<T>;
   limit?: number;
   offset?: number;
+  orderBy?: OrderBy<T> | OrderBy<T>[];
 };
 
 export type UpdateOptions<T> = {
@@ -41,17 +53,46 @@ export type DbCore<T> = {
 };
 
 export function createDbCore<T>(db: Database, table: string): DbCore<T> {
-  const notImplemented = (op: string): Promise<never> =>
-    Promise.reject(
-      new Error(
-        `altacore: createDbCore.${op} is not yet implemented (table=${table}, driver=${db.driver.kind})`,
-      ),
-    );
+  const driver = db.driver;
+  const dialect = driver.dialect;
+
+  const supportsReturn = dialect.returningStrategy !== 'none';
 
   return {
-    select: () => notImplemented('select'),
-    insert: () => notImplemented('insert'),
-    update: () => notImplemented('update'),
-    delete: () => notImplemented('delete'),
+    async select(options) {
+      const { sql, params } = buildSelect<T>(table, dialect, options);
+      const result = await driver.query<T>(sql, params);
+      return result.rows;
+    },
+    async insert(values) {
+      const { sql, params } = buildInsert<T>(
+        table,
+        dialect,
+        values,
+        supportsReturn,
+      );
+      const result = await driver.query<T>(sql, params);
+      const first = result.rows[0];
+      // pg/mssql: first row is the DB's view of the inserted record (defaults,
+      // triggers, autogen all reflected). mysql: no native return — echo input.
+      if (supportsReturn && first !== undefined) return first;
+      return values;
+    },
+    async update(options) {
+      const { sql, params } = buildUpdate<T>(
+        table,
+        dialect,
+        options,
+        supportsReturn,
+      );
+      const result = await driver.query<T>(sql, params);
+      // pg/mssql: rows are the post-update state. mysql: no return — empty.
+      return supportsReturn ? result.rows : [];
+    },
+    async delete(options) {
+      const { sql, params } = buildDelete<T>(table, dialect, options);
+      const result = await driver.query(sql, params);
+      return result.rowCount;
+    },
   };
 }

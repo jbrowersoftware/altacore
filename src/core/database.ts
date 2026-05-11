@@ -77,9 +77,7 @@ async function loadDriver(config: DatabaseConfig): Promise<Driver> {
     }
     default: {
       const exhaustive: never = kind;
-      throw new Error(
-        `altacore: unknown driver "${String(exhaustive)}".`,
-      );
+      throw new Error(`altacore: unknown driver "${String(exhaustive)}".`);
     }
   }
 }

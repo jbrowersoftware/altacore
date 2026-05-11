@@ -1,10 +1,15 @@
 export { createDatabase } from './core/database.js';
-export type { Database, DatabaseConfig, DatabaseDriver } from './core/database.js';
+export type {
+  Database,
+  DatabaseConfig,
+  DatabaseDriver,
+} from './core/database.js';
 
 export { createDbCore } from './core/dbCore.js';
 export type {
   DbCore,
   DeleteOptions,
+  OrderBy,
   SelectOptions,
   UpdateOptions,
   Where,

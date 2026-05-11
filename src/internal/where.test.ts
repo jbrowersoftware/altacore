@@ -4,11 +4,15 @@ import { buildWhere, type SqlDialect } from './where.js';
 const pg: SqlDialect = {
   placeholder: (i) => `$${i}`,
   quoteIdentifier: (name) => `"${name}"`,
+  formatLimitOffset: () => '',
+  returningStrategy: 'none',
 };
 
 const mysql: SqlDialect = {
   placeholder: () => '?',
   quoteIdentifier: (name) => `\`${name}\``,
+  formatLimitOffset: () => '',
+  returningStrategy: 'none',
 };
 
 type Row = {
@@ -42,10 +46,7 @@ describe('buildWhere', () => {
   });
 
   it('renders comparison operators', () => {
-    const r = buildWhere<Row>(
-      { age: { gt: 18, lte: 65 }, id: { ne: 0 } },
-      pg,
-    );
+    const r = buildWhere<Row>({ age: { gt: 18, lte: 65 }, id: { ne: 0 } }, pg);
     expect(r.sql).toBe('"age" > $1 AND "age" <= $2 AND "id" <> $3');
     expect(r.params).toEqual([18, 65, 0]);
   });

@@ -6,6 +6,21 @@ export type SqlDialect = {
   placeholder: (oneBasedIndex: number) => string;
   // Quote a column/table identifier safely for the target dialect.
   quoteIdentifier: (name: string) => string;
+  // Render the LIMIT/OFFSET clause for SELECT. Result includes a leading
+  // space when non-empty so callers can append directly. mssql diverges:
+  // OFFSET/FETCH requires ORDER BY — when `hasOrderBy` is false a synthetic
+  // ORDER BY is emitted; when true, the caller is trusted to have already
+  // emitted one.
+  formatLimitOffset: (
+    limit?: number,
+    offset?: number,
+    hasOrderBy?: boolean,
+  ) => string;
+  // How (and whether) the dialect returns affected rows from INSERT/UPDATE.
+  //   'returning' — pg-style `RETURNING *` suffix
+  //   'output'    — mssql-style `OUTPUT INSERTED.*` mid-statement
+  //   'none'      — not natively supported (mysql)
+  returningStrategy: 'returning' | 'output' | 'none';
 };
 
 export type WhereSql = {
@@ -51,6 +66,9 @@ function isOperatorObject(value: unknown): value is Record<string, unknown> {
 export function buildWhere<T>(
   where: Where<T> | undefined,
   dialect: SqlDialect,
+  // Offset for placeholder numbering — lets a WHERE clause be appended after
+  // an existing parameter list (e.g. UPDATE's SET clause).
+  offset = 0,
 ): WhereSql {
   if (!where) return { sql: '', params: [] };
 
@@ -59,7 +77,7 @@ export function buildWhere<T>(
 
   const addParam = (value: unknown): string => {
     params.push(value);
-    return dialect.placeholder(params.length);
+    return dialect.placeholder(offset + params.length);
   };
 
   for (const [column, condition] of Object.entries(where)) {

@@ -6,9 +6,7 @@ export function nullsToUndefined<R>(row: R): R {
     return row;
   }
   const result: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(
-    row as Record<string, unknown>,
-  )) {
+  for (const [key, value] of Object.entries(row as Record<string, unknown>)) {
     result[key] = value === null ? undefined : value;
   }
   return result as R;

@@ -1,8 +1,5 @@
 import type { SqlDialect } from '../internal/where.js';
-import type {
-  DatabaseConfig,
-  DatabaseDriver,
-} from '../core/database.js';
+import type { DatabaseConfig, DatabaseDriver } from '../core/database.js';
 
 export type QueryResult<R = unknown> = {
   rows: R[];

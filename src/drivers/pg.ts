@@ -21,10 +21,9 @@ export const createPgDriver: DriverFactory = (
       if (closed) {
         throw new Error('altacore: cannot query a closed driver.');
       }
-      const result = await pool.query<Record<string, unknown>>(
-        sqlText,
-        [...params],
-      );
+      const result = await pool.query<Record<string, unknown>>(sqlText, [
+        ...params,
+      ]);
       return {
         rows: result.rows as R[],
         rowCount: result.rowCount ?? 0,

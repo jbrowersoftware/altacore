@@ -12,12 +12,36 @@ function ensureValidIdentifier(name: string, dialect: string): void {
   }
 }
 
+const standardLimitOffset = (limit?: number, offset?: number): string => {
+  let sql = '';
+  if (limit !== undefined) sql += ` LIMIT ${limit}`;
+  if (offset !== undefined) sql += ` OFFSET ${offset}`;
+  return sql;
+};
+
+const mssqlLimitOffset = (
+  limit?: number,
+  offset?: number,
+  hasOrderBy = false,
+): string => {
+  if (limit === undefined && offset === undefined) return '';
+  const off = offset ?? 0;
+  // MSSQL OFFSET/FETCH requires ORDER BY. If the caller already emitted one,
+  // skip the synthetic; otherwise insert (SELECT NULL) as a no-op ordering.
+  const orderPrefix = hasOrderBy ? '' : ' ORDER BY (SELECT NULL)';
+  let sql = `${orderPrefix} OFFSET ${off} ROWS`;
+  if (limit !== undefined) sql += ` FETCH NEXT ${limit} ROWS ONLY`;
+  return sql;
+};
+
 export const pgDialect: SqlDialect = {
   placeholder: (index) => `$${index}`,
   quoteIdentifier: (name) => {
     ensureValidIdentifier(name, 'pg');
     return `"${name.replaceAll('"', '""')}"`;
   },
+  formatLimitOffset: standardLimitOffset,
+  returningStrategy: 'returning',
 };
 
 export const mysqlDialect: SqlDialect = {
@@ -26,6 +50,8 @@ export const mysqlDialect: SqlDialect = {
     ensureValidIdentifier(name, 'mysql');
     return '`' + name.replaceAll('`', '``') + '`';
   },
+  formatLimitOffset: standardLimitOffset,
+  returningStrategy: 'none',
 };
 
 export const mssqlDialect: SqlDialect = {
@@ -34,6 +60,8 @@ export const mssqlDialect: SqlDialect = {
     ensureValidIdentifier(name, 'mssql');
     return `[${name.replaceAll(']', ']]')}]`;
   },
+  formatLimitOffset: mssqlLimitOffset,
+  returningStrategy: 'output',
 };
 
 export const DIALECTS: Record<DatabaseDriver, SqlDialect> = {

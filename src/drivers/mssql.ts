@@ -34,10 +34,7 @@ export const createMssqlDriver: DriverFactory = (
       const result = await request.query<R>(sqlText);
       const recordset = result.recordset;
       const rows: R[] = recordset ?? [];
-      const affected = (result.rowsAffected ?? []).reduce(
-        (a, b) => a + b,
-        0,
-      );
+      const affected = (result.rowsAffected ?? []).reduce((a, b) => a + b, 0);
       return {
         rows,
         rowCount: recordset ? rows.length : affected,
