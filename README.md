@@ -195,11 +195,11 @@ const db = createDatabase({
 
 `pool` is an optional, dialect-neutral subset of pool sizing knobs forwarded to the underlying driver:
 
-| Field               | pg                  | mysql                                    | mssql                            |
-| ------------------- | ------------------- | ---------------------------------------- | -------------------------------- |
-| `max`               | `max`               | `connectionLimit`                        | `pool.max`                       |
-| `min`               | `min`               | _ignored — mysql2 has no minimum-idle_   | `pool.min`                       |
-| `idleTimeoutMillis` | `idleTimeoutMillis` | `idleTimeout`                            | `pool.idleTimeoutMillis`         |
+| Field               | pg                  | mysql                                  | mssql                    |
+| ------------------- | ------------------- | -------------------------------------- | ------------------------ |
+| `max`               | `max`               | `connectionLimit`                      | `pool.max`               |
+| `min`               | `min`               | _ignored — mysql2 has no minimum-idle_ | `pool.min`               |
+| `idleTimeoutMillis` | `idleTimeoutMillis` | `idleTimeout`                          | `pool.idleTimeoutMillis` |
 
 Anything outside this set should be configured by constructing the underlying driver directly — Altacore deliberately keeps this surface small.
 

@@ -18,7 +18,9 @@ export const createMssqlDriver: DriverFactory = (
       min?: number;
       idleTimeoutMillis?: number;
     };
-    const internal = pool as unknown as { config: { pool?: PoolConfigInternal } };
+    const internal = pool as unknown as {
+      config: { pool?: PoolConfigInternal };
+    };
     internal.config.pool = {
       ...internal.config.pool,
       ...(config.pool.max !== undefined && { max: config.pool.max }),

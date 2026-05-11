@@ -147,9 +147,9 @@ describe('buildSelect', () => {
   });
 
   it('throws when columns is an empty array', () => {
-    expect(() =>
-      buildSelect<Row>('users', pgDialect, { columns: [] }),
-    ).toThrow(/'columns' cannot be empty/);
+    expect(() => buildSelect<Row>('users', pgDialect, { columns: [] })).toThrow(
+      /'columns' cannot be empty/,
+    );
   });
 
   it('rejects non-integer or negative limit/offset', () => {
