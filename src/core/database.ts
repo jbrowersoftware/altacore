@@ -1,4 +1,5 @@
 import { DIALECTS } from '../internal/dialect.js';
+import { nullsToUndefined } from '../internal/normalize.js';
 import type { Driver, QueryResult } from '../drivers/types.js';
 
 export type DatabaseDriver = 'pg' | 'mysql' | 'mssql';
@@ -47,7 +48,11 @@ function createLazyDriver(config: DatabaseConfig): Driver {
       params: readonly unknown[],
     ): Promise<QueryResult<R>> {
       const driver = await ensure();
-      return driver.query<R>(sql, params);
+      const raw = await driver.query<R>(sql, params);
+      return {
+        rows: raw.rows.map((r) => nullsToUndefined(r)),
+        rowCount: raw.rowCount,
+      };
     },
     async close() {
       if (real) await real.close();
