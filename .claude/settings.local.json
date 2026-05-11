@@ -1,5 +1,5 @@
 {
   "permissions": {
-    "allow": ["Edit(altacore/**)"]
+    "allow": ["Edit(CLAUDE.md)", "Edit(src/**)"]
   }
 }
