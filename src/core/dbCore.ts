@@ -7,8 +7,11 @@ import {
 } from '../internal/sql.js';
 
 export type WhereOperators<V> = {
-  eq?: V;
-  ne?: V;
+  // null is always permitted on eq/ne — translated to IS NULL / IS NOT NULL.
+  // Legal SQL on any column regardless of nullability; on a NOT NULL column it
+  // simply yields always-false / always-true.
+  eq?: V | null;
+  ne?: V | null;
   gt?: V;
   gte?: V;
   lt?: V;
@@ -18,7 +21,8 @@ export type WhereOperators<V> = {
   like?: V extends string ? string : never;
 };
 
-export type WhereCondition<V> = V | WhereOperators<V>;
+// Bare null is also accepted (translated to IS NULL) for the same reason.
+export type WhereCondition<V> = V | null | WhereOperators<V>;
 
 export type Where<T> = {
   [K in keyof T]?: WhereCondition<T[K]>;

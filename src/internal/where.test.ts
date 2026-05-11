@@ -131,6 +131,41 @@ describe('buildWhere', () => {
     expect(r.params).toEqual([1, 'foo']);
   });
 
+  // The Row type above models `bio: string | null`; these cases also need to
+  // typecheck on rows that follow the `?:` convention (V = string | undefined)
+  // and on strictly non-null columns. Type-only assertions: if these compile
+  // without `as` casts, the typing gap is closed.
+  type StrictRow = { id: number; name: string };
+  type OptionalRow = { id: number; bio?: string };
+
+  it('eq null typechecks on a strictly non-null column', () => {
+    expect(buildWhere<StrictRow>({ id: { eq: null } }, pg)).toEqual({
+      sql: '"id" IS NULL',
+      params: [],
+    });
+  });
+
+  it('bare null typechecks on a strictly non-null column', () => {
+    expect(buildWhere<StrictRow>({ id: null }, pg)).toEqual({
+      sql: '"id" IS NULL',
+      params: [],
+    });
+  });
+
+  it('eq null typechecks on an optional (?:) column', () => {
+    expect(buildWhere<OptionalRow>({ bio: { eq: null } }, pg)).toEqual({
+      sql: '"bio" IS NULL',
+      params: [],
+    });
+  });
+
+  it('ne null typechecks on an optional (?:) column', () => {
+    expect(buildWhere<OptionalRow>({ bio: { ne: null } }, pg)).toEqual({
+      sql: '"bio" IS NOT NULL',
+      params: [],
+    });
+  });
+
   it('throws on unknown operator', () => {
     expect(() =>
       // @ts-expect-error testing runtime guard against a non-typed operator
