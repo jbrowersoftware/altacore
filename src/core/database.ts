@@ -87,7 +87,9 @@ async function loadDriver(config: DatabaseConfig): Promise<Driver> {
       return mod.createMssqlDriver(config);
     }
     default: {
+      // Compile-time check
       const exhaustive: never = kind;
+      // Run-time check
       throw new Error(`altacore: unknown driver "${String(exhaustive)}".`);
     }
   }

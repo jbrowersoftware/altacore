@@ -74,46 +74,52 @@ export function createDbCore<T>(db: Database, table: string): DbCore<T> {
   const supportsReturn = dialect.returningStrategy !== 'none';
 
   // The implementation has a single signature; the overloads on SelectFn
-  // narrow the return type at the call site based on whether columns is given.
+  // narrow the return type at the call site based on whether columns are given.
   const select = (async (options?: SelectOptions<T>) => {
     const { sql, params } = buildSelect<T>(table, dialect, options);
     const result = await driver.query<T>(sql, params);
     return result.rows;
   }) as SelectFn<T>;
 
+  const insert = async (values: Partial<T>): Promise<T> => {
+    const { sql, params } = buildInsert<T>(
+      table,
+      dialect,
+      values,
+      supportsReturn,
+    );
+    const result = await driver.query<T>(sql, params);
+    const first = result.rows[0];
+    // pg/mssql: first row is the DB's view of the inserted record (defaults,
+    // triggers, autogen all reflected). mysql: no native return — echo the
+    // input. Fields the user didn't supply will simply be absent on the
+    // returned object; consumers needing a full row on mysql should select.
+    if (supportsReturn && first !== undefined) return first;
+    return values as T;
+  };
+
+  const update = async (options: UpdateOptions<T>): Promise<T[]> => {
+    const { sql, params } = buildUpdate<T>(
+      table,
+      dialect,
+      options,
+      supportsReturn,
+    );
+    const result = await driver.query<T>(sql, params);
+    // pg/mssql: rows are the post-update state. mysql: no return — empty.
+    return supportsReturn ? result.rows : [];
+  };
+
+  const del = async (options: DeleteOptions<T>): Promise<number> => {
+    const { sql, params } = buildDelete<T>(table, dialect, options);
+    const result = await driver.query(sql, params);
+    return result.rowCount;
+  };
+
   return {
     select,
-    async insert(values) {
-      const { sql, params } = buildInsert<T>(
-        table,
-        dialect,
-        values,
-        supportsReturn,
-      );
-      const result = await driver.query<T>(sql, params);
-      const first = result.rows[0];
-      // pg/mssql: first row is the DB's view of the inserted record (defaults,
-      // triggers, autogen all reflected). mysql: no native return — echo the
-      // input. Fields the user didn't supply will simply be absent on the
-      // returned object; consumers needing a full row on mysql should select.
-      if (supportsReturn && first !== undefined) return first;
-      return values as T;
-    },
-    async update(options) {
-      const { sql, params } = buildUpdate<T>(
-        table,
-        dialect,
-        options,
-        supportsReturn,
-      );
-      const result = await driver.query<T>(sql, params);
-      // pg/mssql: rows are the post-update state. mysql: no return — empty.
-      return supportsReturn ? result.rows : [];
-    },
-    async delete(options) {
-      const { sql, params } = buildDelete<T>(table, dialect, options);
-      const result = await driver.query(sql, params);
-      return result.rowCount;
-    },
+    insert,
+    update,
+    delete: del,
   };
 }
