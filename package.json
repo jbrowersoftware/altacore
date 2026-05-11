@@ -41,8 +41,16 @@
     "database",
     "nodejs"
   ],
-  "author": "Jesse Brower <jessebrower1@gmail.com>",
+  "author": "Jesse Brower <jbrowersoftware@gmail.com>",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jbrowersoftware/altacore.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jbrowersoftware/altacore/issues"
+  },
+  "homepage": "https://github.com/jbrowersoftware/altacore#readme",
   "peerDependencies": {
     "mssql": "^10.0.0",
     "mysql2": "^3.0.0",
