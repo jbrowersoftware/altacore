@@ -21,7 +21,7 @@ Source is grouped by concern under `src/`. Folders emerge as their first real fi
 - `src/core/` — connection lifecycle, the top-level client factory
 - `src/query/` — query building and execution
 - `src/schema/` — table/column/model definitions
-- `src/drivers/` — per-backend adapters (one file per backend: `pg.ts`, `mysql.ts`, `sqlite.ts`)
+- `src/drivers/` — per-backend adapters (one file per backend: `mssql.ts`, `mysql.ts`, `pg.ts`)
 - `src/internal/` — private helpers; never re-exported from `index.ts`
 
 Anything not re-exported from `src/index.ts` is implicitly private and may change without a major version bump.

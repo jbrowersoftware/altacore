@@ -2,7 +2,7 @@
 
 A lightweight, easy-to-use ORM framework for Node.js applications working with **Microsoft SQL Server**, **MySQL**, and **PostgreSQL**.
 
-> **Status:** pre-1.0, in active development. Working today: `createDatabase`, raw queries via `db.driver.query`, the typed `where` builder, all three drivers (MSSQL, MySQL, PostgreSQL), and `createDbCore` CRUD execution. In progress: returning rows from insert/update via `RETURNING`/`OUTPUT`.
+> **Status:** pre-1.0, in active development. Working today: `createDatabase`, raw queries via `db.driver.query`, the typed `where` builder, `orderBy`, all three drivers (MSSQL, MySQL, PostgreSQL), `createDbCore` CRUD execution, and row-returning insert/update via `RETURNING` (pg) and `OUTPUT INSERTED.*` (mssql).
 
 ## Why Altacore
 
