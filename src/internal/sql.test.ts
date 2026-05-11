@@ -112,6 +112,46 @@ describe('buildSelect', () => {
     });
   });
 
+  it('projects a subset of columns when supplied', () => {
+    expect(
+      buildSelect<Row>('users', pgDialect, { columns: ['id', 'name'] }),
+    ).toEqual({
+      sql: 'SELECT "id", "name" FROM "users"',
+      params: [],
+    });
+  });
+
+  it('combines projected columns with WHERE / ORDER BY / LIMIT', () => {
+    expect(
+      buildSelect<Row>('users', pgDialect, {
+        columns: ['id', 'age'],
+        where: { active: true },
+        orderBy: { col: 'age', direction: 'desc' },
+        limit: 5,
+      }),
+    ).toEqual({
+      sql:
+        'SELECT "id", "age" FROM "users" WHERE "active" = $1 ' +
+        'ORDER BY "age" DESC LIMIT 5',
+      params: [true],
+    });
+  });
+
+  it('quotes projected columns per dialect', () => {
+    expect(
+      buildSelect<Row>('users', mysqlDialect, { columns: ['id', 'name'] }),
+    ).toEqual({
+      sql: 'SELECT `id`, `name` FROM `users`',
+      params: [],
+    });
+  });
+
+  it('throws when columns is an empty array', () => {
+    expect(() =>
+      buildSelect<Row>('users', pgDialect, { columns: [] }),
+    ).toThrow(/'columns' cannot be empty/);
+  });
+
   it('rejects non-integer or negative limit/offset', () => {
     expect(() => buildSelect<Row>('users', pgDialect, { limit: -1 })).toThrow(
       /limit must be a non-negative integer/,
@@ -146,7 +186,7 @@ describe('buildInsert', () => {
       buildInsert<Row>('users', pgDialect, {
         id: 1,
         name: 'a',
-        age: undefined as unknown as number,
+        age: undefined,
         active: true,
         bio: null,
       }),
@@ -157,9 +197,9 @@ describe('buildInsert', () => {
   });
 
   it('throws when no columns survive after filtering', () => {
-    expect(() =>
-      buildInsert<Row>('users', pgDialect, {} as unknown as Row),
-    ).toThrow(/at least one column value/);
+    expect(() => buildInsert<Row>('users', pgDialect, {})).toThrow(
+      /at least one column value/,
+    );
   });
 
   it('appends RETURNING * on pg when returnRows is true', () => {

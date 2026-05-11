@@ -4,9 +4,20 @@ import type { Driver, QueryResult } from '../drivers/types.js';
 
 export type DatabaseDriver = 'pg' | 'mysql' | 'mssql';
 
+// Common pool sizing knobs forwarded to the underlying driver. Anything
+// outside this small set should be configured by constructing the driver
+// directly. `min` is honored on pg + mssql and ignored on mysql (mysql2
+// has no minimum-idle equivalent).
+export type PoolConfig = {
+  max?: number;
+  min?: number;
+  idleTimeoutMillis?: number;
+};
+
 export type DatabaseConfig = {
   driver: DatabaseDriver;
   connectionString: string;
+  pool?: PoolConfig;
 };
 
 export type Database = {

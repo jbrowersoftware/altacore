@@ -46,11 +46,24 @@ describe('createDbCore', () => {
     expect(out).toEqual([{ id: 1, name: 'a', age: 30 }]);
   });
 
+  it('select with columns narrows the row shape and projects in SQL', async () => {
+    const { db, calls } = makeFakeDb([{ id: 1, name: 'a' }], 1);
+    const things = createDbCore<Row>(db, 'things');
+
+    const out = await things.select({ columns: ['id', 'name'] });
+
+    expect(calls[0]?.sql).toBe('SELECT "id", "name" FROM "things"');
+    // Type-level: out is Pick<Row, 'id' | 'name'>[] — `age` is not on the row.
+    expect(out).toEqual([{ id: 1, name: 'a' }]);
+    // @ts-expect-error projected rows do not include unselected columns
+    void out[0]?.age;
+  });
+
   it('insert composes INSERT with RETURNING and returns the first row (pg)', async () => {
     const { db, calls } = makeFakeDb([{ id: 1, name: 'a', age: 30 }], 1);
     const things = createDbCore<Row>(db, 'things');
 
-    const out = await things.insert({ name: 'a', age: 30 } as Row);
+    const out = await things.insert({ name: 'a', age: 30 });
 
     expect(calls[0]?.sql).toBe(
       'INSERT INTO "things" ("name", "age") VALUES ($1, $2) RETURNING *',

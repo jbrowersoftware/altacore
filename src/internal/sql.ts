@@ -49,7 +49,21 @@ export function buildSelect<T>(
   const where = buildWhere(options?.where, dialect);
   const orderClause = formatOrderBy(options?.orderBy, dialect);
 
-  let sql = `SELECT * FROM ${tableQ}`;
+  const columns = options?.columns;
+  let projection: string;
+  if (columns === undefined) {
+    projection = '*';
+  } else {
+    if (columns.length === 0) {
+      throw new TypeError(
+        `altacore: select 'columns' cannot be empty. ` +
+          `Omit the property to select all columns.`,
+      );
+    }
+    projection = columns.map((c) => dialect.quoteIdentifier(c)).join(', ');
+  }
+
+  let sql = `SELECT ${projection} FROM ${tableQ}`;
   if (where.sql) sql += ` WHERE ${where.sql}`;
   sql += orderClause;
 
@@ -68,7 +82,7 @@ export function buildSelect<T>(
 export function buildInsert<T>(
   table: string,
   dialect: SqlDialect,
-  values: T,
+  values: Partial<T>,
   returnRows = false,
 ): SqlBuilt {
   const tableQ = dialect.quoteIdentifier(table);

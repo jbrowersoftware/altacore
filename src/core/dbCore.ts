@@ -34,6 +34,8 @@ export type SelectOptions<T> = {
   limit?: number;
   offset?: number;
   orderBy?: OrderBy<T> | OrderBy<T>[];
+  // Project a subset of columns. Omit to SELECT *.
+  columns?: readonly (keyof T & string)[];
 };
 
 export type UpdateOptions<T> = {
@@ -45,9 +47,18 @@ export type DeleteOptions<T> = {
   where: Where<T>;
 };
 
+// Two-overload signature: when `columns` is supplied as a literal array,
+// the return type narrows to Pick<T, K>[]; otherwise, T[].
+export type SelectFn<T> = {
+  <K extends keyof T & string>(
+    options: SelectOptions<T> & { columns: readonly K[] },
+  ): Promise<Pick<T, K>[]>;
+  (options?: SelectOptions<T>): Promise<T[]>;
+};
+
 export type DbCore<T> = {
-  select: (options?: SelectOptions<T>) => Promise<T[]>;
-  insert: (values: T) => Promise<T>;
+  select: SelectFn<T>;
+  insert: (values: Partial<T>) => Promise<T>;
   update: (options: UpdateOptions<T>) => Promise<T[]>;
   delete: (options: DeleteOptions<T>) => Promise<number>;
 };
@@ -58,12 +69,16 @@ export function createDbCore<T>(db: Database, table: string): DbCore<T> {
 
   const supportsReturn = dialect.returningStrategy !== 'none';
 
+  // The implementation has a single signature; the overloads on SelectFn
+  // narrow the return type at the call site based on whether columns is given.
+  const select = (async (options?: SelectOptions<T>) => {
+    const { sql, params } = buildSelect<T>(table, dialect, options);
+    const result = await driver.query<T>(sql, params);
+    return result.rows;
+  }) as SelectFn<T>;
+
   return {
-    async select(options) {
-      const { sql, params } = buildSelect<T>(table, dialect, options);
-      const result = await driver.query<T>(sql, params);
-      return result.rows;
-    },
+    select,
     async insert(values) {
       const { sql, params } = buildInsert<T>(
         table,
@@ -74,9 +89,11 @@ export function createDbCore<T>(db: Database, table: string): DbCore<T> {
       const result = await driver.query<T>(sql, params);
       const first = result.rows[0];
       // pg/mssql: first row is the DB's view of the inserted record (defaults,
-      // triggers, autogen all reflected). mysql: no native return — echo input.
+      // triggers, autogen all reflected). mysql: no native return — echo the
+      // input. Fields the user didn't supply will simply be absent on the
+      // returned object; consumers needing a full row on mysql should select.
       if (supportsReturn && first !== undefined) return first;
-      return values;
+      return values as T;
     },
     async update(options) {
       const { sql, params } = buildUpdate<T>(

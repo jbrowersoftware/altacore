@@ -7,7 +7,12 @@ import type { Driver, DriverFactory, QueryResult } from './types.js';
 export const createPgDriver: DriverFactory = (
   config: DatabaseConfig,
 ): Driver => {
-  const pool = new Pool({ connectionString: config.connectionString });
+  const pool = new Pool({
+    connectionString: config.connectionString,
+    max: config.pool?.max,
+    min: config.pool?.min,
+    idleTimeoutMillis: config.pool?.idleTimeoutMillis,
+  });
 
   let closed = false;
 

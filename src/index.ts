@@ -3,6 +3,7 @@ export type {
   Database,
   DatabaseConfig,
   DatabaseDriver,
+  PoolConfig,
 } from './core/database.js';
 
 export { createDbCore } from './core/dbCore.js';

@@ -9,6 +9,26 @@ export const createMssqlDriver: DriverFactory = (
 ): Driver => {
   const pool = new mssql.ConnectionPool(config.connectionString);
 
+  // The connection string is parsed in the constructor; layer pool overrides
+  // onto the resulting config before connect() runs. `config` exists at
+  // runtime but isn't exposed by @types/mssql, so we narrow through unknown.
+  if (config.pool) {
+    type PoolConfigInternal = {
+      max?: number;
+      min?: number;
+      idleTimeoutMillis?: number;
+    };
+    const internal = pool as unknown as { config: { pool?: PoolConfigInternal } };
+    internal.config.pool = {
+      ...internal.config.pool,
+      ...(config.pool.max !== undefined && { max: config.pool.max }),
+      ...(config.pool.min !== undefined && { min: config.pool.min }),
+      ...(config.pool.idleTimeoutMillis !== undefined && {
+        idleTimeoutMillis: config.pool.idleTimeoutMillis,
+      }),
+    };
+  }
+
   // Kick off the connect; share one promise across concurrent first queries.
   const ready = pool.connect();
   // Avoid an unhandled rejection if the consumer never queries before close.
