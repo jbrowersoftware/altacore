@@ -43,10 +43,18 @@
   "author": "Jesse Brower <jessebrower1@gmail.com>",
   "license": "MIT",
   "peerDependencies": {
-    "mssql": "^10.0.0"
+    "mssql": "^10.0.0",
+    "mysql2": "^3.0.0",
+    "pg": "^8.0.0"
   },
   "peerDependenciesMeta": {
     "mssql": {
+      "optional": true
+    },
+    "mysql2": {
+      "optional": true
+    },
+    "pg": {
       "optional": true
     }
   },
@@ -54,9 +62,12 @@
     "@eslint/js": "^9.0.0",
     "@types/mssql": "^9.1.5",
     "@types/node": "^22.0.0",
+    "@types/pg": "^8.11.0",
     "eslint": "^9.0.0",
     "eslint-config-prettier": "^9.0.0",
     "mssql": "^10.0.0",
+    "mysql2": "^3.0.0",
+    "pg": "^8.0.0",
     "prettier": "^3.3.0",
     "tsup": "^8.3.0",
     "typescript": "^5.6.0",

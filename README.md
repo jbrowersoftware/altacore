@@ -2,7 +2,7 @@
 
 A lightweight, easy-to-use ORM framework for Node.js applications working with **Microsoft SQL Server**, **MySQL**, and **PostgreSQL**.
 
-> **Status:** pre-1.0, in active development. Working today: `createDatabase`, raw queries via `db.driver.query`, the typed `where` builder, the MSSQL driver. In progress: MySQL and PostgreSQL drivers, `createDbCore` CRUD execution.
+> **Status:** pre-1.0, in active development. Working today: `createDatabase`, raw queries via `db.driver.query`, the typed `where` builder, all three drivers (MSSQL, MySQL, PostgreSQL). In progress: `createDbCore` CRUD execution.
 
 ## Why Altacore
 
@@ -18,8 +18,8 @@ Altacore aims for the middle ground between hand-rolled query builders and heavy
 | Database | Driver (peer dependency) | Status |
 | --- | --- | --- |
 | Microsoft SQL Server | [`mssql`](https://www.npmjs.com/package/mssql) | Wired |
-| MySQL | [`mysql2`](https://www.npmjs.com/package/mysql2) | Coming soon |
-| PostgreSQL | [`pg`](https://www.npmjs.com/package/pg) | Coming soon |
+| MySQL | [`mysql2`](https://www.npmjs.com/package/mysql2) | Wired |
+| PostgreSQL | [`pg`](https://www.npmjs.com/package/pg) | Wired |
 
 Drivers are optional peer dependencies — install only the one you use.
 
@@ -31,7 +31,11 @@ Drivers are optional peer dependencies — install only the one you use.
 
 ```bash
 npm install altacore
-npm install mssql      # or mysql2 / pg, once those drivers land
+
+# Install the driver(s) you actually use:
+npm install mssql      # for Microsoft SQL Server
+npm install mysql2     # for MySQL
+npm install pg         # for PostgreSQL
 ```
 
 ## Quick start

@@ -63,10 +63,14 @@ function createLazyDriver(config: DatabaseConfig): Driver {
 async function loadDriver(config: DatabaseConfig): Promise<Driver> {
   const kind = config.driver;
   switch (kind) {
-    case 'pg':
-      throw new Error('altacore: the pg driver is not yet implemented.');
-    case 'mysql':
-      throw new Error('altacore: the mysql driver is not yet implemented.');
+    case 'pg': {
+      const mod = await import('../drivers/pg.js');
+      return mod.createPgDriver(config);
+    }
+    case 'mysql': {
+      const mod = await import('../drivers/mysql.js');
+      return mod.createMysqlDriver(config);
+    }
     case 'mssql': {
       const mod = await import('../drivers/mssql.js');
       return mod.createMssqlDriver(config);
