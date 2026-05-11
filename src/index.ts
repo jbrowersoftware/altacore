@@ -12,4 +12,6 @@ export type {
   WhereOperators,
 } from './core/dbCore.js';
 
+export type { Driver, DriverFactory, QueryResult } from './drivers/types.js';
+
 export const VERSION = '0.0.1';

@@ -44,7 +44,7 @@ export function createDbCore<T>(db: Database, table: string): DbCore<T> {
   const notImplemented = (op: string): Promise<never> =>
     Promise.reject(
       new Error(
-        `altacore: createDbCore.${op} is not yet implemented (table=${table}, driver=${db.driver})`,
+        `altacore: createDbCore.${op} is not yet implemented (table=${table}, driver=${db.driver.kind})`,
       ),
     );
 

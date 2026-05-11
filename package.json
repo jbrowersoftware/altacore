@@ -1,7 +1,7 @@
 {
   "name": "altacore",
   "version": "0.0.1",
-  "description": "Barebones Node.js ORM",
+  "description": "Core level ORM for Nodejs Projects using MSSQL, mySQL or postgreSQL",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -42,11 +42,21 @@
   ],
   "author": "Jesse Brower <jessebrower1@gmail.com>",
   "license": "MIT",
+  "peerDependencies": {
+    "mssql": "^10.0.0"
+  },
+  "peerDependenciesMeta": {
+    "mssql": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@eslint/js": "^9.0.0",
+    "@types/mssql": "^9.1.5",
     "@types/node": "^22.0.0",
     "eslint": "^9.0.0",
     "eslint-config-prettier": "^9.0.0",
+    "mssql": "^10.0.0",
     "prettier": "^3.3.0",
     "tsup": "^8.3.0",
     "typescript": "^5.6.0",
