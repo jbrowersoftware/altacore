@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { buildDelete, buildInsert, buildSelect, buildUpdate } from './sql.js';
+import {
+  buildCount,
+  buildDelete,
+  buildInsert,
+  buildSelect,
+  buildUpdate,
+} from './sql.js';
 import { mssqlDialect, mysqlDialect, pgDialect } from './dialect.js';
 
 type Row = {
@@ -161,6 +167,33 @@ describe('buildSelect', () => {
     );
     expect(() => buildSelect<Row>('users', pgDialect, { offset: -1 })).toThrow(
       /offset must be a non-negative integer/,
+    );
+  });
+});
+
+describe('buildCount', () => {
+  it('emits SELECT COUNT(*) with no clauses', () => {
+    expect(buildCount<Row>('users', pgDialect)).toEqual({
+      sql: 'SELECT COUNT(*) AS count FROM "users"',
+      params: [],
+    });
+  });
+
+  it('appends WHERE when provided', () => {
+    expect(
+      buildCount<Row>('users', pgDialect, { where: { active: true } }),
+    ).toEqual({
+      sql: 'SELECT COUNT(*) AS count FROM "users" WHERE "active" = $1',
+      params: [true],
+    });
+  });
+
+  it('quotes the table per dialect', () => {
+    expect(buildCount<Row>('users', mysqlDialect).sql).toBe(
+      'SELECT COUNT(*) AS count FROM `users`',
+    );
+    expect(buildCount<Row>('users', mssqlDialect).sql).toBe(
+      'SELECT COUNT(*) AS count FROM [users]',
     );
   });
 });

@@ -89,6 +89,39 @@ describe('createDbCore', () => {
     expect(out).toEqual([{ id: 1, name: 'b', age: 31 }]);
   });
 
+  it('count composes SELECT COUNT(*) and returns a number', async () => {
+    const { db, calls } = makeFakeDb([{ count: 7 }], 1);
+    const things = createDbCore<Row>(db, 'things');
+
+    const n = await things.count({ where: { age: { gt: 18 } } });
+
+    expect(calls[0]?.sql).toBe(
+      'SELECT COUNT(*) AS count FROM "things" WHERE "age" > $1',
+    );
+    expect(calls[0]?.params).toEqual([18]);
+    expect(n).toBe(7);
+  });
+
+  it('count coerces pg bigint-string results to a number', async () => {
+    const { db } = makeFakeDb([{ count: '42' }], 1);
+    const things = createDbCore<Row>(db, 'things');
+
+    const n = await things.count();
+
+    expect(n).toBe(42);
+  });
+
+  it('count works with no options (no WHERE clause)', async () => {
+    const { db, calls } = makeFakeDb([{ count: 3 }], 1);
+    const things = createDbCore<Row>(db, 'things');
+
+    const n = await things.count();
+
+    expect(calls[0]?.sql).toBe('SELECT COUNT(*) AS count FROM "things"');
+    expect(calls[0]?.params).toEqual([]);
+    expect(n).toBe(3);
+  });
+
   it('delete composes DELETE and returns rowCount', async () => {
     const { db, calls } = makeFakeDb([], 3);
     const things = createDbCore<Row>(db, 'things');

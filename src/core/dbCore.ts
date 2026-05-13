@@ -1,5 +1,6 @@
 import type { Database } from './database.js';
 import {
+  buildCount,
   buildDelete,
   buildInsert,
   buildSelect,
@@ -50,6 +51,10 @@ export type SelectOptions<T> = {
   columns?: readonly (keyof T & string)[];
 };
 
+export type CountOptions<T> = {
+  where?: Where<T>;
+};
+
 export type UpdateOptions<T> = {
   where: Where<T>;
   set: Partial<T>;
@@ -70,6 +75,7 @@ export type SelectFn<T> = {
 
 export type DbCore<T> = {
   select: SelectFn<T>;
+  count: (options?: CountOptions<T>) => Promise<number>;
   insert: (values: Partial<T>) => Promise<T>;
   update: (options: UpdateOptions<T>) => Promise<T[]>;
   delete: (options: DeleteOptions<T>) => Promise<number>;
@@ -88,6 +94,13 @@ export function createDbCore<T>(db: Database, table: string): DbCore<T> {
     const result = await driver.query<T>(sql, params);
     return result.rows;
   }) as SelectFn<T>;
+
+  const count = async (options?: CountOptions<T>): Promise<number> => {
+    const { sql, params } = buildCount<T>(table, dialect, options);
+    const result = await driver.query<{ count: number | string }>(sql, params);
+    // pg returns COUNT(*) as a bigint string; coerce so consumers get a number.
+    return Number(result.rows[0]?.count ?? 0);
+  };
 
   const insert = async (values: Partial<T>): Promise<T> => {
     const { sql, params } = buildInsert<T>(
@@ -126,6 +139,7 @@ export function createDbCore<T>(db: Database, table: string): DbCore<T> {
 
   return {
     select,
+    count,
     insert,
     update,
     delete: del,

@@ -1,5 +1,6 @@
 import { buildWhere, type SqlDialect } from './where.js';
 import type {
+  CountOptions,
   DeleteOptions,
   OrderBy,
   SelectOptions,
@@ -75,6 +76,20 @@ export function buildSelect<T>(
     options?.offset,
     orderClause !== '',
   );
+
+  return { sql, params: where.params };
+}
+
+export function buildCount<T>(
+  table: string,
+  dialect: SqlDialect,
+  options?: CountOptions<T>,
+): SqlBuilt {
+  const tableQ = dialect.quoteIdentifier(table);
+  const where = buildWhere(options?.where, dialect);
+
+  let sql = `SELECT COUNT(*) AS count FROM ${tableQ}`;
+  if (where.sql) sql += ` WHERE ${where.sql}`;
 
   return { sql, params: where.params };
 }

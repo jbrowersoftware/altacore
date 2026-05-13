@@ -2,7 +2,7 @@
 
 A lightweight, easy-to-use ORM framework for Node.js applications working with **Microsoft SQL Server**, **MySQL**, and **PostgreSQL**.
 
-> **Status:** pre-1.0, in active development. Working today: typed CRUD via `createDbCore` (select with column projection, insert, update, delete), the typed `where` builder, `orderBy`, all three drivers (MSSQL, MySQL, PostgreSQL), row-returning insert/update via `RETURNING` (pg) and `OUTPUT INSERTED.*` (mssql), and connection pool config passthrough.
+> **Status:** pre-1.0, in active development. Working today: typed CRUD via `createDbCore` (select with column projection, count, insert, update, delete), the typed `where` builder, `orderBy`, all three drivers (MSSQL, MySQL, PostgreSQL), row-returning insert/update via `RETURNING` (pg) and `OUTPUT INSERTED.*` (mssql), and connection pool config passthrough.
 
 ## Why Altacore
 
@@ -40,7 +40,7 @@ npm install pg         # for PostgreSQL
 
 ## Quick start
 
-The heart of Altacore is **`createDbCore`** — a typed CRUD core bound to one table. Define a row type once, then `select` / `insert` / `update` / `delete` with full type inference.
+The heart of Altacore is **`createDbCore`** — a typed CRUD core bound to one table. Define a row type once, then `select` / `count` / `insert` / `update` / `delete` with full type inference.
 
 ```ts
 import { createDatabase, createDbCore } from 'altacore';
@@ -69,6 +69,11 @@ const found = await users.select({
   },
   orderBy: { col: 'age', direction: 'desc' },
   limit: 10,
+});
+
+// COUNT — returns a number; same where syntax as select
+const activeAdults = await users.count({
+  where: { active: true, age: { gte: 18 } },
 });
 
 // INSERT — returns the inserted row (pg/mssql) or echoes input (mysql)
@@ -109,6 +114,17 @@ slim[0]?.age; // type error — 'age' was not selected
 ```
 
 `columns` accepts any `keyof T & string`, so you get autocomplete and refactoring safety. Empty arrays are rejected — omit the property to `SELECT *`.
+
+### Counting rows
+
+`count(options?)` issues `SELECT COUNT(*)` and returns a plain `number`. It accepts the same `where` syntax as `select`; omit `where` (or omit `options` entirely) to count every row.
+
+```ts
+const total = await users.count();
+const active = await users.count({ where: { active: true } });
+```
+
+PostgreSQL returns `COUNT(*)` as a bigint string at the driver layer; Altacore coerces it so you always get a `number`.
 
 ### Where clause operators
 
@@ -172,6 +188,7 @@ When you `orderBy` on MSSQL with `limit`/`offset`, your ordering is used directl
 ### Per-driver return shapes
 
 - `select(...)` returns `T[]` (or `Pick<T, K>[]` with column projection) on every driver.
+- `count(...)` returns `number` on every driver.
 - `insert(values: Partial<T>)` returns `T`:
   - **pg** uses `RETURNING *` — the row reflects DB-applied defaults, autogen IDs, and trigger-modified values.
   - **mssql** uses `OUTPUT INSERTED.*` — same.
