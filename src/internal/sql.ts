@@ -205,7 +205,9 @@ function buildKeysetPredicate(
 
 function normalizeJoins(j: JoinsInput | undefined): readonly AnyJoinInput[] {
   if (!j) return [];
-  return Array.isArray(j) ? (j as readonly AnyJoinInput[]) : [j as AnyJoinInput];
+  return Array.isArray(j)
+    ? (j as readonly AnyJoinInput[])
+    : [j as AnyJoinInput];
 }
 
 function normalizeOnPairs(
@@ -415,7 +417,13 @@ export function buildSelect<T>(
   // Aggregate projections come first in SELECT text, so their params lead.
   const aggR = buildAggregates(options?.aggregates, dialect, table, 0);
 
-  const joinChunk = buildJoinChain(table, '', joins, dialect, aggR.params.length);
+  const joinChunk = buildJoinChain(
+    table,
+    '',
+    joins,
+    dialect,
+    aggR.params.length,
+  );
   projections.push(...joinChunk.projections, ...aggR.projections);
 
   // Param order follows clause order: aggregates, ON/where, GROUP BY, ORDER BY.
@@ -574,7 +582,13 @@ function buildSelectKeyset<T>(
 
   // WHERE = regular predicate AND keyset seek predicate.
   const whereAfter = aggR.params.length + joinChunk.params.length;
-  const whereR = buildWhere(options.where, dialect, whereAfter, qualifier, table);
+  const whereR = buildWhere(
+    options.where,
+    dialect,
+    whereAfter,
+    qualifier,
+    table,
+  );
   const seekOffset = whereAfter + whereR.params.length;
   const seek = buildKeysetPredicate(keyset, dialect, qualifier, seekOffset);
   const whereSql =

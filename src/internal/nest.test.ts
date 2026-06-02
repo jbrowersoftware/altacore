@@ -4,7 +4,8 @@ import type { AnyJoin, DbCore } from '../core/dbCore.js';
 
 // Minimal DbCore stand-in for tests — the nester only reads .alias/.type/
 // .select from JoinSpec, and never touches .table beyond carrying it through.
-const stubTable = (name: string) => ({ tableName: name }) as unknown as DbCore<unknown>;
+const stubTable = (name: string) =>
+  ({ tableName: name }) as unknown as DbCore<unknown>;
 
 function joinSpec(spec: {
   alias: string;

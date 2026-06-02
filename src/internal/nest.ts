@@ -11,7 +11,9 @@ type JoinsInput = AnyJoinInput | readonly AnyJoinInput[];
 
 function normalizeJoins(j: JoinsInput | undefined): readonly AnyJoinInput[] {
   if (!j) return [];
-  return Array.isArray(j) ? (j as readonly AnyJoinInput[]) : [j as AnyJoinInput];
+  return Array.isArray(j)
+    ? (j as readonly AnyJoinInput[])
+    : [j as AnyJoinInput];
 }
 
 // A nested join slot is "absent" when every leaf value beneath it came back

@@ -195,10 +195,7 @@ describe('buildWhere', () => {
   });
 
   it('renders a standalone or group', () => {
-    const r = buildWhere<Row>(
-      { or: [{ id: 1 }, { id: 2 }, { id: 3 }] },
-      pg,
-    );
+    const r = buildWhere<Row>({ or: [{ id: 1 }, { id: 2 }, { id: 3 }] }, pg);
     expect(r.sql).toBe('("id" = $1 OR "id" = $2 OR "id" = $3)');
     expect(r.params).toEqual([1, 2, 3]);
   });
@@ -215,10 +212,7 @@ describe('buildWhere', () => {
   it('parenthesizes a multi-part AND branch inside an or group', () => {
     const r = buildWhere<Row>(
       {
-        or: [
-          { name: { like: 'a%' } },
-          { age: { gt: 65 }, bio: { ne: null } },
-        ],
+        or: [{ name: { like: 'a%' } }, { age: { gt: 65 }, bio: { ne: null } }],
       },
       pg,
     );
@@ -263,10 +257,7 @@ describe('buildWhere', () => {
   });
 
   it('skips empty branches within a group', () => {
-    const r = buildWhere<Row>(
-      { or: [{}, { id: 1 }, { id: 2 }] },
-      pg,
-    );
+    const r = buildWhere<Row>({ or: [{}, { id: 1 }, { id: 2 }] }, pg);
     expect(r.sql).toBe('("id" = $1 OR "id" = $2)');
     expect(r.params).toEqual([1, 2]);
   });

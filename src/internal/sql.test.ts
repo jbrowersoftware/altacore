@@ -267,9 +267,9 @@ describe('buildSelect with joins', () => {
         select: { columns: ['id'] },
       },
     });
-    expect(out.sql.startsWith('SELECT "users".*, "o"."id" AS "o.id" FROM')).toBe(
-      true,
-    );
+    expect(
+      out.sql.startsWith('SELECT "users".*, "o"."id" AS "o.id" FROM'),
+    ).toBe(true);
   });
 
   it('emits LEFT JOIN and AND-s join.where into the ON clause', () => {
@@ -394,10 +394,16 @@ describe('buildSelect with joins', () => {
       },
     };
     expect(
-      buildSelect<Row>('users', pgDialect, { ...opt, join: { ...opt.join, type: 'right' } }).sql,
+      buildSelect<Row>('users', pgDialect, {
+        ...opt,
+        join: { ...opt.join, type: 'right' },
+      }).sql,
     ).toContain('RIGHT JOIN');
     expect(
-      buildSelect<Row>('users', pgDialect, { ...opt, join: { ...opt.join, type: 'full' } }).sql,
+      buildSelect<Row>('users', pgDialect, {
+        ...opt,
+        join: { ...opt.join, type: 'full' },
+      }).sql,
     ).toContain('FULL JOIN');
   });
 
@@ -501,7 +507,9 @@ describe('buildSelect with joins', () => {
       limit: 10,
       offset: 20,
     });
-    expect(out.sql).toContain('(SELECT * FROM "users" LIMIT 10 OFFSET 20) AS "page"');
+    expect(out.sql).toContain(
+      '(SELECT * FROM "users" LIMIT 10 OFFSET 20) AS "page"',
+    );
     expect(out.sql).toContain('"page"."id" = "o"."userId"');
   });
 
@@ -731,7 +739,9 @@ describe('buildSelect — aggregates', () => {
       buildSelect<Row>('users', pgDialect, {
         columns: ['active'],
         groupBy: { col: 'active' },
-        aggregates: [{ fn: 'count', arg: { col: 'id' }, distinct: true, as: 'ids' }],
+        aggregates: [
+          { fn: 'count', arg: { col: 'id' }, distinct: true, as: 'ids' },
+        ],
       }).sql,
     ).toBe(
       'SELECT "active", COUNT(DISTINCT "id") AS "ids" FROM "users" GROUP BY "active"',
@@ -766,7 +776,12 @@ describe('buildSelect — aggregates', () => {
         },
         groupBy: { col: 'id' },
         aggregates: [
-          { fn: 'count', arg: { alias: 'o', col: 'id' }, distinct: true, as: 'orderCount' },
+          {
+            fn: 'count',
+            arg: { alias: 'o', col: 'id' },
+            distinct: true,
+            as: 'orderCount',
+          },
         ],
       }).sql,
     ).toBe(
@@ -783,7 +798,9 @@ describe('buildSelect — aggregates', () => {
         columns: ['active'],
         where: { active: true },
         groupBy: { col: 'active' },
-        aggregates: [{ fn: 'sum', arg: { coalesce: [{ col: 'age' }, 0] }, as: 's' }],
+        aggregates: [
+          { fn: 'sum', arg: { coalesce: [{ col: 'age' }, 0] }, as: 's' },
+        ],
       }),
     ).toEqual({
       sql:
@@ -798,7 +815,9 @@ describe('buildSelect — aggregates', () => {
       buildSelect<Row>('users', mssqlDialect, {
         columns: ['active'],
         groupBy: { col: 'active' },
-        aggregates: [{ fn: 'count', arg: { col: 'id' }, distinct: true, as: 'ids' }],
+        aggregates: [
+          { fn: 'count', arg: { col: 'id' }, distinct: true, as: 'ids' },
+        ],
       }).sql,
     ).toBe(
       'SELECT [active], COUNT(DISTINCT [id]) AS [ids] FROM [users] GROUP BY [active]',
@@ -811,7 +830,12 @@ describe('buildSelect — aggregates', () => {
         columns: ['active'],
         groupBy: { col: 'active' },
         aggregates: [
-          { fn: 'stringAgg', arg: { col: 'name' }, separator: ', ', as: 'names' },
+          {
+            fn: 'stringAgg',
+            arg: { col: 'name' },
+            separator: ', ',
+            as: 'names',
+          },
         ],
       }),
     ).toEqual({
@@ -828,7 +852,12 @@ describe('buildSelect — aggregates', () => {
         columns: ['active'],
         groupBy: { col: 'active' },
         aggregates: [
-          { fn: 'stringAgg', arg: { col: 'name' }, separator: ', ', as: 'names' },
+          {
+            fn: 'stringAgg',
+            arg: { col: 'name' },
+            separator: ', ',
+            as: 'names',
+          },
         ],
       }),
     ).toEqual({
@@ -845,7 +874,12 @@ describe('buildSelect — aggregates', () => {
         columns: ['active'],
         groupBy: { col: 'active' },
         aggregates: [
-          { fn: 'stringAgg', arg: { col: 'name' }, separator: '; ', as: 'names' },
+          {
+            fn: 'stringAgg',
+            arg: { col: 'name' },
+            separator: '; ',
+            as: 'names',
+          },
         ],
       }),
     ).toEqual({
@@ -956,7 +990,10 @@ describe('buildSelect — EXISTS / NOT EXISTS', () => {
     expect(
       buildSelect<Row>('users', pgDialect, {
         where: {
-          or: [{ active: true }, { exists: { table: orders, on: ['id', 'userId'] } }],
+          or: [
+            { active: true },
+            { exists: { table: orders, on: ['id', 'userId'] } },
+          ],
         },
       }),
     ).toEqual({
@@ -1059,7 +1096,7 @@ describe('buildSelect — keyset cursor', () => {
       buildSelect<Row>('users', pgDialect, {
         keyset: {
           keys: [
-            { expr: { coalesce: [{ col: 'bio' }, '' ] }, direction: 'asc' },
+            { expr: { coalesce: [{ col: 'bio' }, ''] }, direction: 'asc' },
             { expr: { col: 'id' }, direction: 'asc' },
           ],
           after: ['x', 5],

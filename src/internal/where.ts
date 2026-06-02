@@ -323,9 +323,7 @@ export function renderRef(
 function isCoalesce(
   expr: ExprRuntime,
 ): expr is { coalesce: readonly [RefRuntime, unknown] } {
-  return (
-    typeof expr === 'object' && expr !== null && 'coalesce' in expr
-  );
+  return typeof expr === 'object' && expr !== null && 'coalesce' in expr;
 }
 
 // Render an expression to SQL, pushing any bound params onto `params`.

@@ -202,13 +202,14 @@ type ProjectColumns<R, C> = C extends readonly (infer K)[]
     : never
   : Record<never, never>;
 
-type JoinedRow<J> = J extends JoinSpec<any, infer R, any>
-  ? ProjectColumns<
-      R,
-      J extends { select: { columns: infer C } } ? C : undefined
-    > &
-      NestedFromSelect<J extends { select: infer S } ? S : undefined>
-  : never;
+type JoinedRow<J> =
+  J extends JoinSpec<any, infer R, any>
+    ? ProjectColumns<
+        R,
+        J extends { select: { columns: infer C } } ? C : undefined
+      > &
+        NestedFromSelect<J extends { select: infer S } ? S : undefined>
+    : never;
 
 type NestedFromSelect<S> = S extends { join: infer J }
   ? J extends readonly any[]
@@ -216,14 +217,15 @@ type NestedFromSelect<S> = S extends { join: infer J }
     : JoinAliasEntry<J>
   : {};
 
-type JoinAliasEntry<J> = J extends JoinSpec<any, any, infer A>
-  ? {
-      [K in A]: Optional<
-        JoinedRow<J>,
-        J extends { type: infer T } ? T & JoinType : 'inner'
-      >;
-    }
-  : {};
+type JoinAliasEntry<J> =
+  J extends JoinSpec<any, any, infer A>
+    ? {
+        [K in A]: Optional<
+          JoinedRow<J>,
+          J extends { type: infer T } ? T & JoinType : 'inner'
+        >;
+      }
+    : {};
 
 type AllJoinEntries<J extends readonly AnyJoin<any>[]> = UnionToIntersection<
   { [I in keyof J]: JoinAliasEntry<J[I]> }[number]
@@ -234,9 +236,8 @@ type AllJoinEntries<J extends readonly AnyJoin<any>[]> = UnionToIntersection<
 // column of a joined table regardless of what's projected — e.g. STRING_AGG
 // over a joined column that isn't returned per-row. No LEFT/FULL `Optional`
 // wrapper, since a ref addresses the column whether or not the row is present.
-type AliasMapEntry<J> = J extends JoinSpec<any, infer R, infer A>
-  ? { [K in A]: R }
-  : {};
+type AliasMapEntry<J> =
+  J extends JoinSpec<any, infer R, infer A> ? { [K in A]: R } : {};
 
 export type AliasMapOf<J> = J extends readonly AnyJoin<any>[]
   ? UnionToIntersection<{ [I in keyof J]: AliasMapEntry<J[I]> }[number]>

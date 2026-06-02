@@ -207,7 +207,10 @@ describe('createDbCore', () => {
         select: { columns: ['id', 'total'] },
       },
       // `o` is a known alias and `total` a known column on it — type-checks.
-      orderBy: [{ alias: 'o', col: 'total', direction: 'desc' }, { col: 'name' }],
+      orderBy: [
+        { alias: 'o', col: 'total', direction: 'desc' },
+        { col: 'name' },
+      ],
       groupBy: { alias: 'o', col: 'total' },
     });
 
@@ -233,7 +236,12 @@ describe('createDbCore', () => {
       groupBy: { col: 'active' },
       aggregates: [
         { fn: 'count', arg: '*', as: 'n' },
-        { fn: 'count', arg: { col: 'age' }, distinct: true, as: 'distinctAges' },
+        {
+          fn: 'count',
+          arg: { col: 'age' },
+          distinct: true,
+          as: 'distinctAges',
+        },
       ],
     });
 
@@ -297,13 +305,18 @@ describe('createDbCore', () => {
         on: ['id', 'userId'],
       },
       aggregates: [
-        { fn: 'stringAgg', arg: { alias: 'r', col: 'name' }, separator: ',', as: 'roles' },
+        {
+          fn: 'stringAgg',
+          arg: { alias: 'r', col: 'name' },
+          separator: ',',
+          as: 'roles',
+        },
       ],
       where: { exists: { table: audits, on: ['id', 'userId'] } },
       groupBy: [{ col: 'id' }, { col: 'name' }],
       keyset: {
         keys: [
-          { expr: { coalesce: [{ col: 'name' }, '' ] }, direction: 'asc' },
+          { expr: { coalesce: [{ col: 'name' }, ''] }, direction: 'asc' },
           { expr: { col: 'id' }, direction: 'asc' },
         ],
         after: ['M', 0],
@@ -417,7 +430,13 @@ describe('createDbCore', () => {
     const { db } = makeFakeDb(
       [
         { id: 1, name: 'A', age: 30, 'o.id': 10, 'o.total': 100 },
-        { id: 3, name: 'Carol', age: 32, 'o.id': undefined, 'o.total': undefined },
+        {
+          id: 3,
+          name: 'Carol',
+          age: 32,
+          'o.id': undefined,
+          'o.total': undefined,
+        },
       ],
       2,
     );
