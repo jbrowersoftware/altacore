@@ -8,13 +8,19 @@ export type {
 
 export { createDbCore } from './core/dbCore.js';
 export type {
+  Aggregate,
   AnyJoin,
+  ColRef,
   CountOptions,
   DbCore,
   DeleteOptions,
+  ExistsSpec,
+  Expr,
   JoinSelect,
   JoinSpec,
   JoinType,
+  Keyset,
+  KeysetKey,
   OnPair,
   OnSpec,
   OrderBy,
@@ -29,4 +35,4 @@ export type {
 
 export type { Driver, DriverFactory, QueryResult } from './drivers/types.js';
 
-export const VERSION = '0.0.3';
+export const VERSION = '0.1.0';

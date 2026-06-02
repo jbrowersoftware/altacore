@@ -6,6 +6,7 @@ const pg: SqlDialect = {
   quoteIdentifier: (name) => `"${name}"`,
   formatLimitOffset: () => '',
   returningStrategy: 'none',
+  stringAgg: (expr, sep) => `STRING_AGG(${expr}, ${sep})`,
 };
 
 const mysql: SqlDialect = {
@@ -13,6 +14,7 @@ const mysql: SqlDialect = {
   quoteIdentifier: (name) => `\`${name}\``,
   formatLimitOffset: () => '',
   returningStrategy: 'none',
+  stringAgg: (expr, sep) => `GROUP_CONCAT(${expr} SEPARATOR ${sep})`,
 };
 
 type Row = {

@@ -192,6 +192,225 @@ describe('createDbCore', () => {
     ]);
   });
 
+  it('select() accepts qualified orderBy/groupBy refs against the join alias', async () => {
+    type Order = { id: number; userId: number; total: number };
+    const { db, calls } = makeFakeDb([], 0);
+    const things = createDbCore<Row>(db, 'things');
+    const orders = createDbCore<Order>(db, 'orders');
+
+    await things.select({
+      columns: ['id'],
+      join: {
+        table: orders,
+        alias: 'o',
+        on: ['id', 'userId'],
+        select: { columns: ['id', 'total'] },
+      },
+      // `o` is a known alias and `total` a known column on it — type-checks.
+      orderBy: [{ alias: 'o', col: 'total', direction: 'desc' }, { col: 'name' }],
+      groupBy: { alias: 'o', col: 'total' },
+    });
+
+    expect(calls[0]?.sql).toBe(
+      'SELECT "things"."id", "o"."id" AS "o.id", "o"."total" AS "o.total" ' +
+        'FROM "things" ' +
+        'INNER JOIN "orders" AS "o" ON "things"."id" = "o"."userId" ' +
+        'GROUP BY "o"."total" ' +
+        'ORDER BY "o"."total" DESC, "things"."name" ASC',
+    );
+  });
+
+  it('select() with aggregates: emits SQL, coerces numeric outputs, types keys', async () => {
+    // pg returns COUNT/SUM as bigint/numeric strings — verify coercion.
+    const { db, calls } = makeFakeDb(
+      [{ active: true, n: '5', distinctAges: '3' }],
+      1,
+    );
+    const things = createDbCore<Row>(db, 'things');
+
+    const out = await things.select({
+      columns: ['active'],
+      groupBy: { col: 'active' },
+      aggregates: [
+        { fn: 'count', arg: '*', as: 'n' },
+        { fn: 'count', arg: { col: 'age' }, distinct: true, as: 'distinctAges' },
+      ],
+    });
+
+    expect(calls[0]?.sql).toBe(
+      'SELECT "active", COUNT(*) AS "n", COUNT(DISTINCT "age") AS "distinctAges" ' +
+        'FROM "things" GROUP BY "active"',
+    );
+    // String aggregate outputs are coerced to numbers.
+    expect(out[0]?.n).toBe(5);
+    expect(out[0]?.distinctAges).toBe(3);
+    // Type-level: each `as` key is present and typed `number`.
+    const n: number = out[0]!.n;
+    const d: number = out[0]!.distinctAges;
+    expect(n + d).toBe(8);
+  });
+
+  it('select() filters with a correlated EXISTS subquery', async () => {
+    type Order = { id: number; userId: number; status: string };
+    const { db, calls } = makeFakeDb([], 0);
+    const things = createDbCore<Row>(db, 'things');
+    const orders = createDbCore<Order>(db, 'orders');
+
+    await things.select({
+      where: {
+        active: true,
+        exists: {
+          table: orders,
+          on: ['id', 'userId'],
+          where: { status: 'paid' },
+        },
+      },
+    });
+
+    expect(calls[0]?.sql).toBe(
+      'SELECT * FROM "things" WHERE "active" = $1 AND EXISTS ' +
+        '(SELECT 1 FROM "orders" AS "_ex0" WHERE "_ex0"."userId" = "things"."id" ' +
+        'AND "_ex0"."status" = $2)',
+    );
+    expect(calls[0]?.params).toEqual([true, 'paid']);
+  });
+
+  it('select() composes STRING_AGG + EXISTS + nullable keyset (users/list shape)', async () => {
+    type Role = { id: number; userId: number; name: string };
+    type Audit = { id: number; userId: number };
+    const { db, calls } = makeFakeDb(
+      [{ id: 1, name: 'Ann', roles: 'admin,ops' }],
+      1,
+    );
+    const users = createDbCore<Row>(db, 'users');
+    const roles = createDbCore<Role>(db, 'roles');
+    const audits = createDbCore<Audit>(db, 'audits');
+
+    const out = await users.select({
+      columns: ['id', 'name'],
+      // LEFT join purely to aggregate roles.name — it projects nothing, so
+      // it doesn't need to appear in GROUP BY.
+      join: {
+        table: roles,
+        type: 'left',
+        alias: 'r',
+        on: ['id', 'userId'],
+      },
+      aggregates: [
+        { fn: 'stringAgg', arg: { alias: 'r', col: 'name' }, separator: ',', as: 'roles' },
+      ],
+      where: { exists: { table: audits, on: ['id', 'userId'] } },
+      groupBy: [{ col: 'id' }, { col: 'name' }],
+      keyset: {
+        keys: [
+          { expr: { coalesce: [{ col: 'name' }, '' ] }, direction: 'asc' },
+          { expr: { col: 'id' }, direction: 'asc' },
+        ],
+        after: ['M', 0],
+        limit: 50,
+      },
+    });
+
+    expect(calls[0]?.sql).toBe(
+      'SELECT "users"."id", "users"."name", STRING_AGG("r"."name", $1) AS "roles" ' +
+        'FROM "users" LEFT JOIN "roles" AS "r" ON "users"."id" = "r"."userId" ' +
+        'WHERE EXISTS (SELECT 1 FROM "audits" AS "_ex0" WHERE "_ex0"."userId" = "users"."id") ' +
+        'AND (COALESCE("users"."name", $2) > $3 OR ' +
+        '(COALESCE("users"."name", $4) = $5 AND "users"."id" > $6)) ' +
+        'GROUP BY "users"."id", "users"."name" ' +
+        'ORDER BY COALESCE("users"."name", $7) ASC, "users"."id" ASC LIMIT 50',
+    );
+    expect(calls[0]?.params).toEqual([',', '', 'M', '', 'M', 0, '']);
+    // `roles` is typed as string; the unprojected join contributes no row key.
+    const r: string = out[0]!.roles;
+    expect(r).toBe('admin,ops');
+  });
+
+  it('select() pages a cross-table keyset cursor and nests the result', async () => {
+    type Order = { id: number; userId: number; total: number };
+    const { db, calls } = makeFakeDb(
+      [{ id: 2, name: 'B', age: 31, 'o.total': 200 }],
+      1,
+    );
+    const things = createDbCore<Row>(db, 'things');
+    const orders = createDbCore<Order>(db, 'orders');
+
+    const out = await things.select({
+      columns: ['id', 'name'],
+      join: {
+        table: orders,
+        alias: 'o',
+        on: ['id', 'userId'],
+        select: { columns: ['total'] },
+      },
+      keyset: {
+        // Key spans the outer table and the joined alias — the cross-table
+        // cursor that the offset/subquery path can't express.
+        keys: [
+          { expr: { col: 'name' }, direction: 'asc' },
+          { expr: { alias: 'o', col: 'total' }, direction: 'desc' },
+        ],
+        after: ['A', 300],
+        limit: 25,
+      },
+    });
+
+    expect(calls[0]?.sql).toBe(
+      'SELECT "things"."id", "things"."name", "o"."total" AS "o.total" ' +
+        'FROM "things" ' +
+        'INNER JOIN "orders" AS "o" ON "things"."id" = "o"."userId" ' +
+        'WHERE ("things"."name" > $1 OR ("things"."name" = $2 AND "o"."total" < $3)) ' +
+        'ORDER BY "things"."name" ASC, "o"."total" DESC LIMIT 25',
+    );
+    expect(calls[0]?.params).toEqual(['A', 'A', 300]);
+    expect(out).toEqual([{ id: 2, name: 'B', age: 31, o: { total: 200 } }]);
+  });
+
+  it('select() rejects keyset refs to unknown aliases (type-level)', async () => {
+    type Order = { id: number; userId: number; total: number };
+    const { db } = makeFakeDb([], 0);
+    const things = createDbCore<Row>(db, 'things');
+    const orders = createDbCore<Order>(db, 'orders');
+
+    await things.select({
+      columns: ['id'],
+      join: {
+        table: orders,
+        alias: 'o',
+        on: ['id', 'userId'],
+        select: { columns: ['total'] },
+      },
+      keyset: {
+        // @ts-expect-error 'q' is not a join alias on this call
+        keys: [{ expr: { alias: 'q', col: 'total' } }],
+        after: [1],
+      },
+    });
+  });
+
+  it('select() rejects orderBy refs to unknown aliases/columns (type-level)', async () => {
+    type Order = { id: number; userId: number; total: number };
+    const { db } = makeFakeDb([], 0);
+    const things = createDbCore<Row>(db, 'things');
+    const orders = createDbCore<Order>(db, 'orders');
+
+    await things.select({
+      columns: ['id'],
+      join: {
+        table: orders,
+        alias: 'o',
+        on: ['id', 'userId'],
+        select: { columns: ['id', 'total'] },
+      },
+      orderBy: [
+        // @ts-expect-error 'x' is not a join alias on this call
+        { alias: 'x', col: 'total' },
+        // @ts-expect-error 'nope' is not a column on alias 'o'
+        { alias: 'o', col: 'nope' },
+      ],
+    });
+  });
+
   it('LEFT join with no match sets the joined slot to undefined', async () => {
     type Order = { id: number; userId: number; total: number };
     // Carol has no order — joined cols come back undefined (post null-normalization)

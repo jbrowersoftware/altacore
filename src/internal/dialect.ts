@@ -42,6 +42,7 @@ export const pgDialect: SqlDialect = {
   },
   formatLimitOffset: standardLimitOffset,
   returningStrategy: 'returning',
+  stringAgg: (expr, separator) => `STRING_AGG(${expr}, ${separator})`,
 };
 
 export const mysqlDialect: SqlDialect = {
@@ -52,6 +53,8 @@ export const mysqlDialect: SqlDialect = {
   },
   formatLimitOffset: standardLimitOffset,
   returningStrategy: 'none',
+  stringAgg: (expr, separator) =>
+    `GROUP_CONCAT(${expr} SEPARATOR ${separator})`,
 };
 
 export const mssqlDialect: SqlDialect = {
@@ -62,6 +65,7 @@ export const mssqlDialect: SqlDialect = {
   },
   formatLimitOffset: mssqlLimitOffset,
   returningStrategy: 'output',
+  stringAgg: (expr, separator) => `STRING_AGG(${expr}, ${separator})`,
 };
 
 export const DIALECTS: Record<DatabaseDriver, SqlDialect> = {

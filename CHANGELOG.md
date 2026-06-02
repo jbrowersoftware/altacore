@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0] - 2026-06-02
+
+### Breaking changes
+
+- **`SelectFn<T>` / `SelectWithCountFn<T>` overloads gained a generic alias-map (`M`) and an aggregates type parameter (`A`).** Every existing call pattern resolves to the same overload and return type. Only impact: code that declares a variable typed as `SelectFn<T>` / `SelectWithCountFn<T>` and assigns a function not handling the widened generics may fail to type-check.
+- **`SqlDialect` gains a required `stringAgg(expr, separator)` method.** Consumers who construct a custom `SqlDialect` (the three built-in dialects are unaffected) must add it.
+
+### Added
+
+- **Qualified column references in `orderBy` and `groupBy`.** A ref is either `{ col }` (outer table) or `{ alias, col }` (any joined alias on the same call). The alias map is derived from the call's joins, so refs are type-checked against the real joined tables — and may target any column of a joined table, even one that isn't projected.
+- **`groupBy`** option — one expression or an array; refs may span the outer table and joined aliases.
+- **Keyset / cursor pagination** via `keyset: { keys, after, limit? }`. Emits the expanded lexicographic seek predicate (`(k0 > ?) OR (k0 = ? AND k1 > ?) …`, portable across all three dialects — no row-value comparison) and a matching `ORDER BY` from the same keys. Keys may span the outer table and joined aliases and use `COALESCE` for nullable columns. Pages the joined result set directly (flat emission); mutually exclusive with `limit`/`offset`.
+- **`COALESCE` expression** (`{ coalesce: [ref, fallback] }`) usable anywhere an `Expr` is accepted (orderBy, groupBy, keyset keys, aggregate args) — portable nullable-column ordering/cursoring.
+- **Aggregate output columns** via `aggregates: Aggregate[]`: `count` (with `'*'` or a column, optional `distinct`), `sum`/`avg`/`min`/`max`, and `stringAgg` (STRING_AGG on pg/mssql, GROUP_CONCAT on mysql). Each `as` becomes a typed result-row key (count/sum/avg → `number`, stringAgg → `string`, min/max → the column type for a plain outer-column arg). Numeric outputs are coerced from pg's bigint/numeric strings, mirroring `count()`.
+- **`EXISTS` / `NOT EXISTS`** correlated subqueries in `where` via the reserved `exists` / `notExists` keys: `{ table, on, where? }`. `on` correlates outer column(s) with the subquery's; `where` adds alias-scoped sub-filters. Each subquery gets a unique `_exN` alias; nested EXISTS are supported.
+- A join used purely to feed an aggregate (e.g. STRING_AGG over a joined column) may omit `select.columns` — it then projects nothing and need not appear in `GROUP BY`. Its alias contributes no result-row key.
+- New public type exports: `ColRef`, `Expr`, `Keyset`, `KeysetKey`, `Aggregate`, `ExistsSpec`.
+
+### Known limitations
+
+- Ordered / `DISTINCT` string aggregation is not yet modeled (plain `STRING_AGG(expr, sep)` / `GROUP_CONCAT(expr SEPARATOR sep)` only).
+- `count()` returns a scalar `COUNT(*)`; it does not count grouped rows. Use a wrapping query if you need group counts.
+
 ## [0.0.3] - 2026-05-13
 
 ### Breaking changes

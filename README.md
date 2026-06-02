@@ -2,7 +2,7 @@
 
 A lightweight, easy-to-use ORM framework for Node.js applications working with **Microsoft SQL Server**, **MySQL**, and **PostgreSQL**.
 
-> **Status:** pre-1.0, in active development. Working today: typed CRUD via `createDbCore` (select with column projection, count, insert, update, delete), typed joins (inner / left / right / full, multi-column ON, nested joins, array of joins, count over a join) with nested-by-alias result rows, subquery-wrapped pagination over joins, `selectWithCount` for paginated page + total in one call, the typed `where` builder, `orderBy`, all three drivers (MSSQL, MySQL, PostgreSQL), row-returning insert/update via `RETURNING` (pg) and `OUTPUT INSERTED.*` (mssql), and connection pool config passthrough.
+> **Status:** pre-1.0, in active development. Typed CRUD, joins, aggregates, and keyset pagination work today across all three drivers — see the [`createDbCore` reference](#createdbcore-reference) for the full surface.
 
 ## Why Altacore
 
@@ -277,9 +277,9 @@ Result — **Carol is preserved**:
 ```ts
 [
   { id: 1, name: 'Alice', o: { id: 10, total: 100 } },
-  { id: 2, name: 'Bob',   o: { id: 12, total: 200 } },
+  { id: 2, name: 'Bob', o: { id: 12, total: 200 } },
   { id: 3, name: 'Carol', o: undefined },
-]
+];
 ```
 
 The footgun this prevents: if the predicate landed in outer WHERE instead (`WHERE o.status = 'paid'`), `o.status` would be `NULL` for Carol, `NULL = 'paid'` evaluates to `UNKNOWN`, and the WHERE drops her — silently converting the LEFT JOIN into an INNER JOIN. Altacore picks the ON placement so the type of join you wrote is the type of join you get.
@@ -390,11 +390,156 @@ Note: `COUNT(*)` over a join counts joined rows. A user with three paid orders c
 
 #### Constraints and gotchas
 
-- **`select.columns` is required on every join used with `select()`.** The SQL builder needs the column list to emit alias-qualified projections (`"o"."id" AS "o.id"`) so the result mapper can nest rows by dotted key. Omitting it throws a clear runtime error. `count()` skips this requirement since it doesn't project.
-- **Outer `where` columns can't reference joined columns yet.** If you need to filter the result set against a joined column, either switch the join to `inner` (if dropping unmatched outer rows is the goal) or wait for a future dotted-key / `having` mechanism.
-- **`orderBy` is outer-only.** Ordering by a joined column isn't expressible in v1.
+- **`select.columns` is required on every join used with `select()`** — except a join that exists purely to feed an aggregate or group (see [Grouping and aggregates](#grouping-and-aggregates)), which may omit it to project nothing. Otherwise the SQL builder needs the column list to emit alias-qualified projections (`"o"."id" AS "o.id"`) so the result mapper can nest rows by dotted key; omitting it throws a clear runtime error. `count()` skips this requirement since it doesn't project.
+- **`orderBy`, `groupBy`, keyset keys, and aggregate args can reference joined columns** via `{ alias, col }` (typed against the call's joins). But **plain outer `where` conditions are still outer-column-only** — for cross-table filtering use an [`EXISTS` subquery](#exists--not-exists-subqueries), or switch the join to `inner` when the goal is simply to drop unmatched outer rows.
 - **Don't use column names containing `.`** when joining — the result mapper splits keys on dots to nest. Source columns with literal dots in their names will be misinterpreted.
-- **1:N joins still duplicate outer rows in the result.** Altacore's nested-by-alias result shape carries a single joined row per alias slot, so a 1:N join produces multiple result rows that share an outer row (each pairing it with a different joined match). Pagination correctly limits **outer rows** in the subquery, but `result.length` can exceed your page size when 1:N expands. For the same reason, `count()` (and `selectWithCount`'s `total`) counts join-result rows, not distinct outer rows. If your domain is genuinely 1:N and you need array-shaped joined data, that's not modeled in v1.
+- **1:N joins still duplicate outer rows in the result.** Altacore's nested-by-alias result shape carries a single joined row per alias slot, so a 1:N join produces multiple result rows that share an outer row (each pairing it with a different joined match). Pagination correctly limits **outer rows** in the subquery, but `result.length` can exceed your page size when 1:N expands. For the same reason, `count()` (and `selectWithCount`'s `total`) counts join-result rows, not distinct outer rows. If your domain is genuinely 1:N and you need array-shaped joined data, that's not modeled in v1. (Aggregating the 1:N side — e.g. `COUNT DISTINCT` or `STRING_AGG` with `groupBy` — collapses it back to one row per group; see [Grouping and aggregates](#grouping-and-aggregates).)
+
+### Column references and expressions
+
+Several options (`orderBy`, `groupBy`, keyset keys, aggregate args) accept a **column reference** rather than a bare column name. A reference is one of:
+
+- `{ col: 'age' }` — a column on the outer table.
+- `{ alias: 'o', col: 'total' }` — a column on a joined alias. The alias and column are type-checked against the joins on the same call, and may target **any** column of the joined table — even one that isn't projected.
+
+Anywhere a reference is accepted you can also use a **`COALESCE` expression** for portable nullable handling (renders `COALESCE(col, fallback)` on all three dialects):
+
+```ts
+{
+  coalesce: [{ col: 'bio' }, ''];
+} // COALESCE("bio", $n)
+{
+  coalesce: [{ alias: 'o', col: 'total' }, 0];
+} // COALESCE("o"."total", $n)
+```
+
+### Grouping and aggregates
+
+`groupBy` takes one reference or an array; `aggregates` adds computed output columns. Each aggregate names a result key with `as`, and the return type gains that key — typed `number` for `count` / `sum` / `avg`, `string` for `stringAgg`, and the source column's type for `min` / `max`.
+
+```ts
+// Count active users per status
+const byStatus = await users.select({
+  columns: ['status'],
+  groupBy: { col: 'status' },
+  aggregates: [{ fn: 'count', arg: '*', as: 'n' }],
+});
+// rows: Array<{ status: string; n: number }>
+// SELECT "status", COUNT(*) AS "n" FROM "users" GROUP BY "status"
+```
+
+Supported aggregates: `count` (with `arg: '*'` or a column reference, plus optional `distinct: true`), `sum` / `avg` / `min` / `max` (column reference), and `stringAgg` (joins values with a `separator` — `STRING_AGG` on pg/mssql, `GROUP_CONCAT(... SEPARATOR ...)` on mysql).
+
+```ts
+// COUNT DISTINCT of a joined column, grouped by the outer table
+const deficienciesPerLocation = await locations.select({
+  columns: ['id'],
+  join: { table: deficiencies, alias: 'd', on: ['id', 'locationId'] },
+  groupBy: { col: 'id' },
+  aggregates: [
+    {
+      fn: 'count',
+      arg: { alias: 'd', col: 'id' },
+      distinct: true,
+      as: 'count',
+    },
+  ],
+});
+// COUNT(DISTINCT "d"."id") AS "count" ... GROUP BY "locations"."id"
+```
+
+A join can exist **purely to feed an aggregate**: omit its `select.columns` and it projects nothing (so it needn't appear in `GROUP BY`), contributing no nested key to the result row.
+
+```ts
+// One row per user with a comma-joined list of their role names
+const usersWithRoles = await users.select({
+  columns: ['id', 'email'],
+  join: { table: roles, type: 'left', alias: 'r', on: ['id', 'userId'] }, // no columns → not projected
+  aggregates: [
+    {
+      fn: 'stringAgg',
+      arg: { alias: 'r', col: 'name' },
+      separator: ', ',
+      as: 'roles',
+    },
+  ],
+  groupBy: [{ col: 'id' }, { col: 'email' }],
+});
+// rows: Array<{ id: number; email: string; roles: string }>
+```
+
+PostgreSQL returns `COUNT` / `SUM` / `AVG` as bigint/numeric strings at the driver layer; Altacore coerces those aggregate outputs to `number`, mirroring `count()`.
+
+> `count()` returns a scalar `COUNT(*)` and does not count grouped rows — wrap the grouped query if you need the number of groups. Ordered and `DISTINCT` string aggregation aren't modeled yet.
+
+### Keyset (cursor) pagination
+
+`keyset` paginates by a stable sort key instead of `offset` — the right tool for deep, consistent pagination and "load more" cursors. It is **mutually exclusive with `limit` / `offset`** (it carries its own `limit`).
+
+```ts
+// First page
+const page1 = await users.select({
+  columns: ['id', 'email', 'age'],
+  keyset: {
+    keys: [
+      { expr: { col: 'age' }, direction: 'asc' },
+      { expr: { col: 'id' }, direction: 'asc' }, // tiebreaker
+    ],
+    after: [0, 0], // start of the sequence
+    limit: 25,
+  },
+});
+
+// Next page: pass the last row's key values as `after`
+const last = page1[page1.length - 1]!;
+const page2 = await users.select({
+  columns: ['id', 'email', 'age'],
+  keyset: {
+    keys: [
+      { expr: { col: 'age' }, direction: 'asc' },
+      { expr: { col: 'id' }, direction: 'asc' },
+    ],
+    after: [last.age, last.id],
+    limit: 25,
+  },
+});
+```
+
+The seek predicate is emitted in expanded lexicographic form — portable across all three dialects (MSSQL has no row-value comparison):
+
+```sql
+WHERE ("age" > $1 OR ("age" = $2 AND "id" > $3))
+ORDER BY "age" ASC, "id" ASC
+LIMIT 25
+```
+
+The same `keys` drive both the predicate and the `ORDER BY`, so the two can never disagree. Keys may **span the outer table and joined aliases** (a cross-table cursor) and use `COALESCE` for nullable columns:
+
+```ts
+await certificates.select({
+  columns: ['id'],
+  join: {
+    table: locations,
+    alias: 'l',
+    on: ['locationId', 'id'],
+    select: { columns: ['customerNumber'] },
+  },
+  keyset: {
+    keys: [
+      { expr: { alias: 'l', col: 'customerNumber' }, direction: 'asc' },
+      {
+        expr: { coalesce: [{ col: 'expiresOn' }, '9999-12-31'] },
+        direction: 'asc',
+      },
+      { expr: { col: 'id' }, direction: 'asc' }, // tiebreaker
+    ],
+    after: ['C-100', '2026-01-01', 0],
+    limit: 50,
+  },
+});
+```
+
+Unlike offset pagination over joins (which subquery-wraps the outer table), a keyset query pages the **joined result set directly** — it's designed for cursoring through ordered result rows.
 
 ### Where clause operators
 
@@ -436,11 +581,40 @@ await users.select({
 });
 ```
 
-Empty groups (`or: []`, `and: []`) and empty branches are skipped, so you can build them conditionally without guarding for the empty case. Because `and` and `or` are reserved group keys, columns literally named `and` or `or` can't be filtered through the property syntax — wrap them in a group instead.
+Empty groups (`or: []`, `and: []`) and empty branches are skipped, so you can build them conditionally without guarding for the empty case. `and`, `or`, `exists`, and `notExists` are all reserved keys in `where`, so columns literally named that way can't be filtered through the property syntax — wrap them in a group instead.
+
+### `EXISTS` / `NOT EXISTS` subqueries
+
+`where` accepts two more reserved keys, `exists` and `notExists`, each taking one spec or an array. A spec is `{ table, on, where? }`: `on` correlates outer column(s) with the subquery's (`[outerCol, subCol]`, or an array of pairs for multi-column), and `where` adds further filters scoped to the subquery. This is how you filter the outer set against a related table without joining it.
+
+```ts
+// Active users who have at least one paid order
+await users.select({
+  where: {
+    active: true,
+    exists: {
+      table: orders,
+      on: ['id', 'userId'], // users.id = orders.userId
+      where: { status: 'paid' },
+    },
+  },
+});
+```
+
+```sql
+SELECT * FROM "users"
+WHERE "active" = $1
+  AND EXISTS (
+    SELECT 1 FROM "orders" AS "_ex0"
+    WHERE "_ex0"."userId" = "users"."id" AND "_ex0"."status" = $2
+  )
+```
+
+`notExists` emits `NOT EXISTS` (e.g. "users with no orders"). Pass an array to require several, and EXISTS works inside `and` / `or` groups too. Each subquery gets a unique `_exN` alias, so multiple (and nested) subqueries never collide.
 
 ### Ordering
 
-`orderBy` accepts a single column or an array. `direction` defaults to `'asc'`.
+`orderBy` accepts a single [column reference](#column-references-and-expressions) (or expression) or an array. `direction` defaults to `'asc'`.
 
 ```ts
 // Single column
@@ -451,7 +625,15 @@ orderBy: [
   { col: 'age', direction: 'desc' },
   { col: 'name' }, // direction omitted -> ASC
 ]
+
+// Reference a joined alias, or order by a COALESCE expression
+orderBy: [
+  { alias: 'o', col: 'total', direction: 'desc' },
+  { coalesce: [{ col: 'bio' }, ''], direction: 'asc' },
+]
 ```
+
+For cursor-style pagination, prefer [keyset pagination](#keyset-cursor-pagination), which derives a matching `ORDER BY` from the same keys.
 
 When you `orderBy` on MSSQL with `limit`/`offset`, your ordering is used directly. Without `orderBy`, MSSQL still requires _some_ ordering for `OFFSET/FETCH` — Altacore inserts a synthetic `ORDER BY (SELECT NULL)`, which means rows come back in whatever order the engine chose. If you care about pagination stability, supply an explicit `orderBy`.
 

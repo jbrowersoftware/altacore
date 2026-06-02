@@ -1,10 +1,15 @@
-import { buildWhere, type SqlDialect } from './where.js';
+import {
+  buildWhere,
+  renderExpr,
+  type ExprRuntime,
+  type SqlDialect,
+} from './where.js';
 import type {
+  Aggregate,
   AnyJoin,
   CountOptions,
   DeleteOptions,
   OnPair,
-  OrderBy,
   SelectOptions,
   UpdateOptions,
 } from '../core/dbCore.js';
@@ -21,7 +26,13 @@ export type SqlBuilt = {
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type AnyJoinInput = AnyJoin<any>;
 type JoinsInput = AnyJoinInput | readonly AnyJoinInput[];
-export type SelectInput<T> = SelectOptions<T> & { join?: JoinsInput };
+// `any` for the alias-map parameter: the runtime path reads orderBy/groupBy/
+// aggregate refs structurally (RefRuntime/ExprRuntime), so the precise alias
+// map that the public overloads enforce isn't needed here.
+export type SelectInput<T> = SelectOptions<T, any> & {
+  join?: JoinsInput;
+  aggregates?: readonly Aggregate<T, any>[];
+};
 /* eslint-enable @typescript-eslint/no-explicit-any */
 
 function ensureNonNegInt(value: number, name: string): void {
@@ -32,17 +43,23 @@ function ensureNonNegInt(value: number, name: string): void {
   }
 }
 
-function formatOrderBy<T>(
-  orderBy: OrderBy<T> | OrderBy<T>[] | undefined,
+// Each clause that can carry an expression (orderBy, groupBy) returns its SQL
+// fragment plus any params the expression bound (only `coalesce` binds today).
+// `offset` continues placeholder numbering past prior clauses; `qualifier` is
+// the outer table/alias that bare `{ col }` refs resolve against.
+type ClausePart = { sql: string; params: unknown[] };
+
+function buildOrderBy<T>(
+  orderBy: SelectInput<T>['orderBy'],
   dialect: SqlDialect,
-  qualifier?: string,
-): string {
-  if (!orderBy) return '';
+  qualifier: string | undefined,
+  offset: number,
+): ClausePart {
+  if (!orderBy) return { sql: '', params: [] };
   const list = Array.isArray(orderBy) ? orderBy : [orderBy];
-  if (list.length === 0) return '';
-  const prefix = qualifier ? `${dialect.quoteIdentifier(qualifier)}.` : '';
+  if (list.length === 0) return { sql: '', params: [] };
+  const params: unknown[] = [];
   const parts = list.map((o) => {
-    const col = `${prefix}${dialect.quoteIdentifier(o.col)}`;
     const dir = o.direction ?? 'asc';
     if (dir !== 'asc' && dir !== 'desc') {
       throw new TypeError(
@@ -50,9 +67,140 @@ function formatOrderBy<T>(
           `Expected 'asc' or 'desc'.`,
       );
     }
-    return `${col} ${dir.toUpperCase()}`;
+    // `o` carries `direction` too; renderExpr only reads col/alias/coalesce.
+    const expr = renderExpr(o, dialect, qualifier, params, offset);
+    return `${expr} ${dir.toUpperCase()}`;
   });
-  return ` ORDER BY ${parts.join(', ')}`;
+  return { sql: ` ORDER BY ${parts.join(', ')}`, params };
+}
+
+function buildGroupBy<T>(
+  groupBy: SelectInput<T>['groupBy'],
+  dialect: SqlDialect,
+  qualifier: string | undefined,
+  offset: number,
+): ClausePart {
+  if (!groupBy) return { sql: '', params: [] };
+  const list = Array.isArray(groupBy) ? groupBy : [groupBy];
+  if (list.length === 0) return { sql: '', params: [] };
+  const params: unknown[] = [];
+  const parts = list.map((e: ExprRuntime) =>
+    renderExpr(e, dialect, qualifier, params, offset),
+  );
+  return { sql: ` GROUP BY ${parts.join(', ')}`, params };
+}
+
+type AggregateRuntime = {
+  fn: 'count' | 'sum' | 'avg' | 'min' | 'max' | 'stringAgg';
+  arg: '*' | ExprRuntime;
+  distinct?: boolean;
+  separator?: string;
+  as: string;
+};
+
+// Aggregate projection fragments (`COUNT(DISTINCT "x") AS "n"`, …) appended to
+// the SELECT list. COUNT/COUNT DISTINCT/SUM/AVG/MIN/MAX are standard across all
+// three dialects. Any params an arg binds (only COALESCE today) are returned so
+// the caller can place them first — projections precede every other clause.
+function buildAggregates<T>(
+  aggregates: SelectInput<T>['aggregates'],
+  dialect: SqlDialect,
+  qualifier: string | undefined,
+  offset: number,
+): ClausePart & { projections: string[] } {
+  if (!aggregates || aggregates.length === 0) {
+    return { sql: '', params: [], projections: [] };
+  }
+  const params: unknown[] = [];
+  const projections = (aggregates as readonly AggregateRuntime[]).map((agg) => {
+    const asQ = dialect.quoteIdentifier(agg.as);
+    if (agg.fn === 'count' && agg.arg === '*') {
+      return `COUNT(*) AS ${asQ}`;
+    }
+    // Non-'*' args are expressions; '*' is only valid for count (above).
+    const col = renderExpr(
+      agg.arg as ExprRuntime,
+      dialect,
+      qualifier,
+      params,
+      offset,
+    );
+    if (agg.fn === 'count') {
+      return `COUNT(${agg.distinct ? 'DISTINCT ' : ''}${col}) AS ${asQ}`;
+    }
+    if (agg.fn === 'stringAgg') {
+      // Separator is the only bound param; pushing it after the arg's params
+      // keeps positional (mysql `?`) numbering consistent across dialects.
+      params.push(agg.separator);
+      const sep = dialect.placeholder(offset + params.length);
+      return `${dialect.stringAgg(col, sep)} AS ${asQ}`;
+    }
+    return `${agg.fn.toUpperCase()}(${col}) AS ${asQ}`;
+  });
+  return { sql: '', params, projections };
+}
+
+type KeysetKeyRuntime = { expr: ExprRuntime; direction?: 'asc' | 'desc' };
+type KeysetRuntime = {
+  keys: readonly KeysetKeyRuntime[];
+  after: readonly unknown[];
+  limit?: number;
+};
+
+// Expanded lexicographic seek predicate for keyset pagination. For keys
+// k0,k1,k2 (each asc/desc) and cursor values v0,v1,v2 it emits:
+//   (k0 > v0) OR (k0 = v0 AND k1 > v1) OR (k0 = v0 AND k1 = v1 AND k2 > v2)
+// `>` for asc, `<` for desc. The expanded form (vs. a row-value
+// `(k0,k1) > (v0,v1)`) is portable — MSSQL has no row-value comparison.
+function buildKeysetPredicate(
+  keyset: KeysetRuntime,
+  dialect: SqlDialect,
+  qualifier: string | undefined,
+  offset: number,
+): ClausePart {
+  const { keys, after } = keyset;
+  if (keys.length === 0) {
+    throw new TypeError(`altacore: keyset 'keys' cannot be empty.`);
+  }
+  if (after.length !== keys.length) {
+    throw new TypeError(
+      `altacore: keyset 'after' must supply one value per key ` +
+        `(got ${after.length} value(s) for ${keys.length} key(s)).`,
+    );
+  }
+
+  const params: unknown[] = [];
+  const addParam = (value: unknown): string => {
+    params.push(value);
+    return dialect.placeholder(offset + params.length);
+  };
+
+  const groups: string[] = [];
+  for (let i = 0; i < keys.length; i++) {
+    const terms: string[] = [];
+    // Tie on every preceding key…
+    for (let j = 0; j < i; j++) {
+      const col = renderExpr(keys[j]!.expr, dialect, qualifier, params, offset);
+      terms.push(`${col} = ${addParam(after[j])}`);
+    }
+    // …then a strict comparison on this key.
+    const dir = keys[i]!.direction ?? 'asc';
+    if (dir !== 'asc' && dir !== 'desc') {
+      throw new TypeError(
+        `altacore: invalid keyset direction "${String(dir)}". ` +
+          `Expected 'asc' or 'desc'.`,
+      );
+    }
+    const op = dir === 'asc' ? '>' : '<';
+    const col = renderExpr(keys[i]!.expr, dialect, qualifier, params, offset);
+    terms.push(`${col} ${op} ${addParam(after[i])}`);
+    groups.push(terms.length > 1 ? `(${terms.join(' AND ')})` : terms[0]!);
+  }
+
+  // Multiple OR groups must be parenthesized so an outer `AND <where>` binds
+  // correctly.
+  const sql = groups.length > 1 ? `(${groups.join(' OR ')})` : groups[0]!;
+  return { sql, params };
 }
 
 function normalizeJoins(j: JoinsInput | undefined): readonly AnyJoinInput[] {
@@ -222,6 +370,13 @@ export function buildSelect<T>(
 ): SqlBuilt {
   const joins = normalizeJoins(options?.join);
 
+  // Keyset/cursor pagination handles its own LIMIT and ORDER BY, and pages
+  // the joined result set directly (flat emission, never the subquery wrap).
+  // Works with or without joins.
+  if (options?.keyset) {
+    return buildSelectKeyset(table, dialect, options, joins);
+  }
+
   // Fast path: no joins — preserve the existing unqualified emission so
   // single-table behavior and tests are unchanged.
   if (joins.length === 0) {
@@ -257,24 +412,41 @@ export function buildSelect<T>(
     }
   }
 
-  const joinChunk = buildJoinChain(table, '', joins, dialect, 0);
-  projections.push(...joinChunk.projections);
+  // Aggregate projections come first in SELECT text, so their params lead.
+  const aggR = buildAggregates(options?.aggregates, dialect, table, 0);
 
-  const whereR = buildWhere(
-    options?.where,
+  const joinChunk = buildJoinChain(table, '', joins, dialect, aggR.params.length);
+  projections.push(...joinChunk.projections, ...aggR.projections);
+
+  // Param order follows clause order: aggregates, ON/where, GROUP BY, ORDER BY.
+  const whereAfter = aggR.params.length + joinChunk.params.length;
+  const whereR = buildWhere(options?.where, dialect, whereAfter, table);
+
+  const groupAfter = whereAfter + whereR.params.length;
+  const groupR = buildGroupBy(options?.groupBy, dialect, table, groupAfter);
+  const orderR = buildOrderBy(
+    options?.orderBy,
     dialect,
-    joinChunk.params.length,
     table,
+    groupAfter + groupR.params.length,
   );
-
-  const orderClause = formatOrderBy(options?.orderBy, dialect, table);
 
   let sql = `SELECT ${projections.join(', ')} FROM ${tableQ}`;
   if (joinChunk.sql) sql += ` ${joinChunk.sql}`;
   if (whereR.sql) sql += ` WHERE ${whereR.sql}`;
-  sql += orderClause;
+  sql += groupR.sql;
+  sql += orderR.sql;
 
-  return { sql, params: [...joinChunk.params, ...whereR.params] };
+  return {
+    sql,
+    params: [
+      ...aggR.params,
+      ...joinChunk.params,
+      ...whereR.params,
+      ...groupR.params,
+      ...orderR.params,
+    ],
+  };
 }
 
 // The subquery `AS page` alias is the parent qualifier for the outermost
@@ -331,42 +503,172 @@ function buildSelectPaginatedJoin<T>(
 
   // Outer ORDER BY for result-row ordering (the inner ORDER BY drives the
   // pagination, but the join's row expansion can reshuffle without an
-  // outer ORDER BY). Qualify with the page alias to disambiguate.
-  const outerOrderClause = formatOrderBy(options.orderBy, dialect, PAGE_ALIAS);
+  // outer ORDER BY). Qualify with the page alias to disambiguate; refs that
+  // name a join alias keep their own qualifier (the join is in the outer query).
+  const outerOrderR = buildOrderBy(
+    options.orderBy,
+    dialect,
+    PAGE_ALIAS,
+    subquery.params.length + joinChunk.params.length,
+  );
 
   let sql = `SELECT ${projections.join(', ')} FROM (${subquery.sql}) AS ${pageQ}`;
   if (joinChunk.sql) sql += ` ${joinChunk.sql}`;
-  sql += outerOrderClause;
+  sql += outerOrderR.sql;
 
-  return { sql, params: [...subquery.params, ...joinChunk.params] };
+  return {
+    sql,
+    params: [...subquery.params, ...joinChunk.params, ...outerOrderR.params],
+  };
+}
+
+const EMPTY_COLUMNS_ERROR =
+  `altacore: select 'columns' cannot be empty. ` +
+  `Omit the property to select all columns.`;
+
+// Keyset/cursor pagination. Emits a flat (non-subquery-wrapped) query so the
+// seek predicate and LIMIT page the joined result set directly — the right
+// semantics for cursoring through ordered result rows. Works with or without
+// joins; the seek keys and ORDER BY are derived from the same `keys` array.
+function buildSelectKeyset<T>(
+  table: string,
+  dialect: SqlDialect,
+  options: SelectInput<T>,
+  joins: readonly AnyJoinInput[],
+): SqlBuilt {
+  if (options.limit !== undefined || options.offset !== undefined) {
+    throw new TypeError(
+      `altacore: 'keyset' cannot be combined with 'limit'/'offset'. ` +
+        `Use 'keyset.limit' to cap the page size.`,
+    );
+  }
+  const keyset = options.keyset as KeysetRuntime;
+  const tableQ = dialect.quoteIdentifier(table);
+  const hasJoins = joins.length > 0;
+  // Bare `{ col }` refs qualify by the outer table only when joins are present;
+  // single-table stays unqualified (matching the flat path).
+  const qualifier = hasJoins ? table : undefined;
+
+  // Outer projection.
+  const projections: string[] = [];
+  const outerCols = options.columns;
+  if (outerCols !== undefined && outerCols.length === 0) {
+    throw new TypeError(EMPTY_COLUMNS_ERROR);
+  }
+  if (outerCols === undefined) {
+    projections.push(hasJoins ? `${tableQ}.*` : '*');
+  } else {
+    for (const c of outerCols) {
+      const colQ = dialect.quoteIdentifier(c);
+      projections.push(hasJoins ? `${tableQ}.${colQ}` : colQ);
+    }
+  }
+
+  // Aggregate projections lead the param list (they appear first in SELECT).
+  const aggR = buildAggregates(options.aggregates, dialect, qualifier, 0);
+
+  const joinChunk = hasJoins
+    ? buildJoinChain(table, '', joins, dialect, aggR.params.length)
+    : { sql: '', projections: [] as string[], params: [] as unknown[] };
+  projections.push(...joinChunk.projections, ...aggR.projections);
+
+  // WHERE = regular predicate AND keyset seek predicate.
+  const whereAfter = aggR.params.length + joinChunk.params.length;
+  const whereR = buildWhere(options.where, dialect, whereAfter, qualifier, table);
+  const seekOffset = whereAfter + whereR.params.length;
+  const seek = buildKeysetPredicate(keyset, dialect, qualifier, seekOffset);
+  const whereSql =
+    whereR.sql && seek.sql
+      ? `${whereR.sql} AND ${seek.sql}`
+      : whereR.sql || seek.sql;
+
+  // GROUP BY, then ORDER BY (from the same keys — consistent with the seek).
+  const groupAfter = seekOffset + seek.params.length;
+  const groupR = buildGroupBy(options.groupBy, dialect, qualifier, groupAfter);
+  const orderList = keyset.keys.map((k) => ({
+    ...k.expr,
+    direction: k.direction,
+  })) as SelectInput<T>['orderBy'];
+  const orderR = buildOrderBy(
+    orderList,
+    dialect,
+    qualifier,
+    groupAfter + groupR.params.length,
+  );
+
+  let sql = `SELECT ${projections.join(', ')} FROM ${tableQ}`;
+  if (joinChunk.sql) sql += ` ${joinChunk.sql}`;
+  if (whereSql) sql += ` WHERE ${whereSql}`;
+  sql += groupR.sql;
+  sql += orderR.sql;
+
+  if (keyset.limit !== undefined) {
+    ensureNonNegInt(keyset.limit, 'keyset.limit');
+    // Keyset always has an ORDER BY, so MSSQL needs no synthetic one.
+    sql += dialect.formatLimitOffset(keyset.limit, undefined, true);
+  }
+
+  return {
+    sql,
+    params: [
+      ...aggR.params,
+      ...joinChunk.params,
+      ...whereR.params,
+      ...seek.params,
+      ...groupR.params,
+      ...orderR.params,
+    ],
+  };
 }
 
 function buildSelectFlat<T>(
   table: string,
   dialect: SqlDialect,
-  options?: SelectOptions<T>,
+  options?: SelectInput<T>,
 ): SqlBuilt {
   const tableQ = dialect.quoteIdentifier(table);
-  const where = buildWhere(options?.where, dialect);
-  const orderClause = formatOrderBy(options?.orderBy, dialect);
+  // Single-table path: bare `{ col }` refs stay unqualified (existing
+  // behavior). Projection comes first in the SQL text, so aggregate params are
+  // numbered before WHERE/GROUP BY/ORDER BY.
+  const aggR = buildAggregates(options?.aggregates, dialect, undefined, 0);
+  // outerTable = table: single-table refs stay unqualified, but EXISTS
+  // correlation still needs the table name to disambiguate the subquery.
+  const where = buildWhere(
+    options?.where,
+    dialect,
+    aggR.params.length,
+    undefined,
+    table,
+  );
+  const groupR = buildGroupBy(
+    options?.groupBy,
+    dialect,
+    undefined,
+    aggR.params.length + where.params.length,
+  );
+  const orderR = buildOrderBy(
+    options?.orderBy,
+    dialect,
+    undefined,
+    aggR.params.length + where.params.length + groupR.params.length,
+  );
 
   const columns = options?.columns;
-  let projection: string;
+  const projections: string[] = [];
   if (columns === undefined) {
-    projection = '*';
+    projections.push('*');
   } else {
     if (columns.length === 0) {
-      throw new TypeError(
-        `altacore: select 'columns' cannot be empty. ` +
-          `Omit the property to select all columns.`,
-      );
+      throw new TypeError(EMPTY_COLUMNS_ERROR);
     }
-    projection = columns.map((c) => dialect.quoteIdentifier(c)).join(', ');
+    projections.push(...columns.map((c) => dialect.quoteIdentifier(c)));
   }
+  projections.push(...aggR.projections);
 
-  let sql = `SELECT ${projection} FROM ${tableQ}`;
+  let sql = `SELECT ${projections.join(', ')} FROM ${tableQ}`;
   if (where.sql) sql += ` WHERE ${where.sql}`;
-  sql += orderClause;
+  sql += groupR.sql;
+  sql += orderR.sql;
 
   if (options?.limit !== undefined) ensureNonNegInt(options.limit, 'limit');
   if (options?.offset !== undefined) ensureNonNegInt(options.offset, 'offset');
@@ -374,10 +676,18 @@ function buildSelectFlat<T>(
   sql += dialect.formatLimitOffset(
     options?.limit,
     options?.offset,
-    orderClause !== '',
+    orderR.sql !== '',
   );
 
-  return { sql, params: where.params };
+  return {
+    sql,
+    params: [
+      ...aggR.params,
+      ...where.params,
+      ...groupR.params,
+      ...orderR.params,
+    ],
+  };
 }
 
 export function buildCount<T>(
@@ -389,7 +699,7 @@ export function buildCount<T>(
   const joins = normalizeJoins(options?.join);
 
   if (joins.length === 0) {
-    const where = buildWhere(options?.where, dialect);
+    const where = buildWhere(options?.where, dialect, 0, undefined, table);
     let sql = `SELECT COUNT(*) AS count FROM ${tableQ}`;
     if (where.sql) sql += ` WHERE ${where.sql}`;
     return { sql, params: where.params };

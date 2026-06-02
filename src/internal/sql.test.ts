@@ -594,6 +594,549 @@ describe('buildSelect with joins', () => {
   });
 });
 
+describe('buildSelect — qualified orderBy & COALESCE', () => {
+  type Order = { id: number; userId: number; total: number; status: string };
+  const orders = stubDb<Order>('orders');
+
+  it('orders by a joined alias column (qualified)', () => {
+    expect(
+      buildSelect<Row>('users', pgDialect, {
+        columns: ['id'],
+        join: {
+          table: orders,
+          alias: 'o',
+          on: ['id', 'userId'],
+          select: { columns: ['id'] },
+        },
+        orderBy: [
+          { alias: 'o', col: 'total', direction: 'desc' },
+          { col: 'name' },
+        ],
+      }).sql,
+    ).toBe(
+      'SELECT "users"."id", "o"."id" AS "o.id" FROM "users" ' +
+        'INNER JOIN "orders" AS "o" ON "users"."id" = "o"."userId" ' +
+        'ORDER BY "o"."total" DESC, "users"."name" ASC',
+    );
+  });
+
+  it('orders by COALESCE(col, fallback) — single table', () => {
+    expect(
+      buildSelect<Row>('users', pgDialect, {
+        orderBy: { coalesce: [{ col: 'bio' }, ''], direction: 'asc' },
+      }),
+    ).toEqual({
+      sql: 'SELECT * FROM "users" ORDER BY COALESCE("bio", $1) ASC',
+      params: [''],
+    });
+  });
+
+  it('numbers COALESCE order params after the WHERE params', () => {
+    expect(
+      buildSelect<Row>('users', pgDialect, {
+        where: { active: true },
+        orderBy: { coalesce: [{ col: 'bio' }, 'z'] },
+      }),
+    ).toEqual({
+      sql: 'SELECT * FROM "users" WHERE "active" = $1 ORDER BY COALESCE("bio", $2) ASC',
+      params: [true, 'z'],
+    });
+  });
+
+  it('keeps COALESCE order params before LIMIT/FETCH on mssql', () => {
+    expect(
+      buildSelect<Row>('users', mssqlDialect, {
+        orderBy: { coalesce: [{ col: 'bio' }, 'z'] },
+        limit: 5,
+      }),
+    ).toEqual({
+      sql: 'SELECT * FROM [users] ORDER BY COALESCE([bio], @p1) ASC OFFSET 0 ROWS FETCH NEXT 5 ROWS ONLY',
+      params: ['z'],
+    });
+  });
+});
+
+describe('buildSelect — groupBy', () => {
+  type Order = { id: number; userId: number; total: number; status: string };
+  const orders = stubDb<Order>('orders');
+
+  it('emits GROUP BY for a single column (single table)', () => {
+    expect(
+      buildSelect<Row>('users', pgDialect, {
+        columns: ['active'],
+        groupBy: { col: 'active' },
+      }).sql,
+    ).toBe('SELECT "active" FROM "users" GROUP BY "active"');
+  });
+
+  it('orders WHERE / GROUP BY / ORDER BY and threads params', () => {
+    expect(
+      buildSelect<Row>('users', pgDialect, {
+        columns: ['active'],
+        where: { age: { gt: 18 } },
+        groupBy: { col: 'active' },
+        orderBy: { col: 'active' },
+      }),
+    ).toEqual({
+      sql: 'SELECT "active" FROM "users" WHERE "age" > $1 GROUP BY "active" ORDER BY "active" ASC',
+      params: [18],
+    });
+  });
+
+  it('groups by outer and joined alias columns', () => {
+    expect(
+      buildSelect<Row>('users', pgDialect, {
+        columns: ['id'],
+        join: {
+          table: orders,
+          alias: 'o',
+          on: ['id', 'userId'],
+          select: { columns: ['id'] },
+        },
+        groupBy: [{ col: 'id' }, { alias: 'o', col: 'status' }],
+      }).sql,
+    ).toBe(
+      'SELECT "users"."id", "o"."id" AS "o.id" FROM "users" ' +
+        'INNER JOIN "orders" AS "o" ON "users"."id" = "o"."userId" ' +
+        'GROUP BY "users"."id", "o"."status"',
+    );
+  });
+
+  it('quotes GROUP BY per dialect (mysql)', () => {
+    expect(
+      buildSelect<Row>('users', mysqlDialect, {
+        columns: ['active'],
+        groupBy: { col: 'active' },
+      }).sql,
+    ).toBe('SELECT `active` FROM `users` GROUP BY `active`');
+  });
+});
+
+describe('buildSelect — aggregates', () => {
+  type Order = { id: number; userId: number; total: number; status: string };
+  const orders = stubDb<Order>('orders');
+
+  it('emits COUNT(*) alongside a grouped column', () => {
+    expect(
+      buildSelect<Row>('users', pgDialect, {
+        columns: ['active'],
+        groupBy: { col: 'active' },
+        aggregates: [{ fn: 'count', arg: '*', as: 'n' }],
+      }).sql,
+    ).toBe('SELECT "active", COUNT(*) AS "n" FROM "users" GROUP BY "active"');
+  });
+
+  it('emits COUNT(DISTINCT col)', () => {
+    expect(
+      buildSelect<Row>('users', pgDialect, {
+        columns: ['active'],
+        groupBy: { col: 'active' },
+        aggregates: [{ fn: 'count', arg: { col: 'id' }, distinct: true, as: 'ids' }],
+      }).sql,
+    ).toBe(
+      'SELECT "active", COUNT(DISTINCT "id") AS "ids" FROM "users" GROUP BY "active"',
+    );
+  });
+
+  it('emits SUM and threads WHERE params after (param-less) aggregate', () => {
+    expect(
+      buildSelect<Row>('users', pgDialect, {
+        columns: ['active'],
+        where: { age: { gt: 18 } },
+        groupBy: { col: 'active' },
+        aggregates: [{ fn: 'sum', arg: { col: 'age' }, as: 'totalAge' }],
+      }),
+    ).toEqual({
+      sql:
+        'SELECT "active", SUM("age") AS "totalAge" FROM "users" ' +
+        'WHERE "age" > $1 GROUP BY "active"',
+      params: [18],
+    });
+  });
+
+  it('counts a DISTINCT joined-alias column with GROUP BY on the outer table', () => {
+    expect(
+      buildSelect<Row>('users', pgDialect, {
+        columns: ['id'],
+        join: {
+          table: orders,
+          alias: 'o',
+          on: ['id', 'userId'],
+          select: { columns: ['id'] },
+        },
+        groupBy: { col: 'id' },
+        aggregates: [
+          { fn: 'count', arg: { alias: 'o', col: 'id' }, distinct: true, as: 'orderCount' },
+        ],
+      }).sql,
+    ).toBe(
+      'SELECT "users"."id", "o"."id" AS "o.id", ' +
+        'COUNT(DISTINCT "o"."id") AS "orderCount" FROM "users" ' +
+        'INNER JOIN "orders" AS "o" ON "users"."id" = "o"."userId" ' +
+        'GROUP BY "users"."id"',
+    );
+  });
+
+  it('numbers a COALESCE aggregate arg before the WHERE params', () => {
+    expect(
+      buildSelect<Row>('users', pgDialect, {
+        columns: ['active'],
+        where: { active: true },
+        groupBy: { col: 'active' },
+        aggregates: [{ fn: 'sum', arg: { coalesce: [{ col: 'age' }, 0] }, as: 's' }],
+      }),
+    ).toEqual({
+      sql:
+        'SELECT "active", SUM(COALESCE("age", $1)) AS "s" FROM "users" ' +
+        'WHERE "active" = $2 GROUP BY "active"',
+      params: [0, true],
+    });
+  });
+
+  it('quotes aggregate output + DISTINCT col per dialect (mssql)', () => {
+    expect(
+      buildSelect<Row>('users', mssqlDialect, {
+        columns: ['active'],
+        groupBy: { col: 'active' },
+        aggregates: [{ fn: 'count', arg: { col: 'id' }, distinct: true, as: 'ids' }],
+      }).sql,
+    ).toBe(
+      'SELECT [active], COUNT(DISTINCT [id]) AS [ids] FROM [users] GROUP BY [active]',
+    );
+  });
+
+  it('emits STRING_AGG with a bound separator (pg)', () => {
+    expect(
+      buildSelect<Row>('users', pgDialect, {
+        columns: ['active'],
+        groupBy: { col: 'active' },
+        aggregates: [
+          { fn: 'stringAgg', arg: { col: 'name' }, separator: ', ', as: 'names' },
+        ],
+      }),
+    ).toEqual({
+      sql:
+        'SELECT "active", STRING_AGG("name", $1) AS "names" FROM "users" ' +
+        'GROUP BY "active"',
+      params: [', '],
+    });
+  });
+
+  it('emits GROUP_CONCAT(... SEPARATOR ?) on mysql', () => {
+    expect(
+      buildSelect<Row>('users', mysqlDialect, {
+        columns: ['active'],
+        groupBy: { col: 'active' },
+        aggregates: [
+          { fn: 'stringAgg', arg: { col: 'name' }, separator: ', ', as: 'names' },
+        ],
+      }),
+    ).toEqual({
+      sql:
+        'SELECT `active`, GROUP_CONCAT(`name` SEPARATOR ?) AS `names` ' +
+        'FROM `users` GROUP BY `active`',
+      params: [', '],
+    });
+  });
+
+  it('emits STRING_AGG on mssql with @p separator', () => {
+    expect(
+      buildSelect<Row>('users', mssqlDialect, {
+        columns: ['active'],
+        groupBy: { col: 'active' },
+        aggregates: [
+          { fn: 'stringAgg', arg: { col: 'name' }, separator: '; ', as: 'names' },
+        ],
+      }),
+    ).toEqual({
+      sql:
+        'SELECT [active], STRING_AGG([name], @p1) AS [names] FROM [users] ' +
+        'GROUP BY [active]',
+      params: ['; '],
+    });
+  });
+});
+
+describe('buildSelect — EXISTS / NOT EXISTS', () => {
+  type Order = { id: number; userId: number; total: number; status: string };
+  type Item = { id: number; orderId: number; sku: string };
+  const orders = stubDb<Order>('orders');
+  const items = stubDb<Item>('items');
+
+  it('emits a correlated EXISTS with the outer column qualified', () => {
+    expect(
+      buildSelect<Row>('users', pgDialect, {
+        where: { exists: { table: orders, on: ['id', 'userId'] } },
+      }),
+    ).toEqual({
+      sql:
+        'SELECT * FROM "users" WHERE EXISTS (SELECT 1 FROM "orders" AS "_ex0" ' +
+        'WHERE "_ex0"."userId" = "users"."id")',
+      params: [],
+    });
+  });
+
+  it('emits NOT EXISTS with an extra alias-scoped sub-filter', () => {
+    expect(
+      buildSelect<Row>('users', pgDialect, {
+        where: {
+          notExists: {
+            table: orders,
+            on: ['id', 'userId'],
+            where: { status: 'paid' },
+          },
+        },
+      }),
+    ).toEqual({
+      sql:
+        'SELECT * FROM "users" WHERE NOT EXISTS (SELECT 1 FROM "orders" AS "_ex0" ' +
+        'WHERE "_ex0"."userId" = "users"."id" AND "_ex0"."status" = $1)',
+      params: ['paid'],
+    });
+  });
+
+  it('threads params across a column condition and the EXISTS sub-filter', () => {
+    expect(
+      buildSelect<Row>('users', pgDialect, {
+        where: {
+          active: true,
+          exists: {
+            table: orders,
+            on: ['id', 'userId'],
+            where: { total: { gt: 100 } },
+          },
+        },
+      }),
+    ).toEqual({
+      sql:
+        'SELECT * FROM "users" WHERE "active" = $1 AND EXISTS ' +
+        '(SELECT 1 FROM "orders" AS "_ex0" WHERE "_ex0"."userId" = "users"."id" ' +
+        'AND "_ex0"."total" > $2)',
+      params: [true, 100],
+    });
+  });
+
+  it('gives each EXISTS in an array a unique alias', () => {
+    expect(
+      buildSelect<Row>('users', pgDialect, {
+        where: {
+          exists: [
+            { table: orders, on: ['id', 'userId'] },
+            { table: items, on: ['id', 'orderId'] },
+          ],
+        },
+      }).sql,
+    ).toBe(
+      'SELECT * FROM "users" WHERE ' +
+        'EXISTS (SELECT 1 FROM "orders" AS "_ex0" WHERE "_ex0"."userId" = "users"."id") ' +
+        'AND EXISTS (SELECT 1 FROM "items" AS "_ex1" WHERE "_ex1"."orderId" = "users"."id")',
+    );
+  });
+
+  it('supports multi-column correlation', () => {
+    expect(
+      buildSelect<Row>('users', pgDialect, {
+        where: {
+          exists: {
+            table: orders,
+            on: [
+              ['id', 'userId'],
+              ['age', 'total'],
+            ],
+          },
+        },
+      }).sql,
+    ).toBe(
+      'SELECT * FROM "users" WHERE EXISTS (SELECT 1 FROM "orders" AS "_ex0" ' +
+        'WHERE "_ex0"."userId" = "users"."id" AND "_ex0"."total" = "users"."age")',
+    );
+  });
+
+  it('works inside an OR group', () => {
+    expect(
+      buildSelect<Row>('users', pgDialect, {
+        where: {
+          or: [{ active: true }, { exists: { table: orders, on: ['id', 'userId'] } }],
+        },
+      }),
+    ).toEqual({
+      sql:
+        'SELECT * FROM "users" WHERE ("active" = $1 OR EXISTS ' +
+        '(SELECT 1 FROM "orders" AS "_ex0" WHERE "_ex0"."userId" = "users"."id"))',
+      params: [true],
+    });
+  });
+
+  it('quotes the EXISTS subquery per dialect (mssql)', () => {
+    expect(
+      buildSelect<Row>('users', mssqlDialect, {
+        where: {
+          exists: {
+            table: orders,
+            on: ['id', 'userId'],
+            where: { status: 'paid' },
+          },
+        },
+      }),
+    ).toEqual({
+      sql:
+        'SELECT * FROM [users] WHERE EXISTS (SELECT 1 FROM [orders] AS [_ex0] ' +
+        'WHERE [_ex0].[userId] = [users].[id] AND [_ex0].[status] = @p1)',
+      params: ['paid'],
+    });
+  });
+
+  it('correlates EXISTS inside a count() WHERE', () => {
+    expect(
+      buildCount<Row>('users', pgDialect, {
+        where: { exists: { table: orders, on: ['id', 'userId'] } },
+      }),
+    ).toEqual({
+      sql:
+        'SELECT COUNT(*) AS count FROM "users" WHERE EXISTS ' +
+        '(SELECT 1 FROM "orders" AS "_ex0" WHERE "_ex0"."userId" = "users"."id")',
+      params: [],
+    });
+  });
+});
+
+describe('buildSelect — keyset cursor', () => {
+  type Order = { id: number; userId: number; total: number; status: string };
+  const orders = stubDb<Order>('orders');
+
+  it('emits an expanded lexicographic seek for a 2-key cursor (single table)', () => {
+    expect(
+      buildSelect<Row>('users', pgDialect, {
+        keyset: {
+          keys: [
+            { expr: { col: 'age' }, direction: 'asc' },
+            { expr: { col: 'id' }, direction: 'asc' },
+          ],
+          after: [30, 100],
+          limit: 20,
+        },
+      }),
+    ).toEqual({
+      sql:
+        'SELECT * FROM "users" ' +
+        'WHERE ("age" > $1 OR ("age" = $2 AND "id" > $3)) ' +
+        'ORDER BY "age" ASC, "id" ASC LIMIT 20',
+      params: [30, 30, 100],
+    });
+  });
+
+  it('spans outer + joined alias columns with mixed directions', () => {
+    expect(
+      buildSelect<Row>('users', pgDialect, {
+        columns: ['id'],
+        join: {
+          table: orders,
+          alias: 'o',
+          on: ['id', 'userId'],
+          select: { columns: ['id'] },
+        },
+        keyset: {
+          keys: [
+            { expr: { col: 'name' }, direction: 'asc' },
+            { expr: { alias: 'o', col: 'total' }, direction: 'desc' },
+          ],
+          after: ['Acme', 500],
+          limit: 50,
+        },
+      }),
+    ).toEqual({
+      sql:
+        'SELECT "users"."id", "o"."id" AS "o.id" FROM "users" ' +
+        'INNER JOIN "orders" AS "o" ON "users"."id" = "o"."userId" ' +
+        'WHERE ("users"."name" > $1 OR ("users"."name" = $2 AND "o"."total" < $3)) ' +
+        'ORDER BY "users"."name" ASC, "o"."total" DESC LIMIT 50',
+      params: ['Acme', 'Acme', 500],
+    });
+  });
+
+  it('supports a COALESCE key for nullable-column cursors', () => {
+    expect(
+      buildSelect<Row>('users', pgDialect, {
+        keyset: {
+          keys: [
+            { expr: { coalesce: [{ col: 'bio' }, '' ] }, direction: 'asc' },
+            { expr: { col: 'id' }, direction: 'asc' },
+          ],
+          after: ['x', 5],
+          limit: 10,
+        },
+      }),
+    ).toEqual({
+      sql:
+        'SELECT * FROM "users" ' +
+        'WHERE (COALESCE("bio", $1) > $2 OR ' +
+        '(COALESCE("bio", $3) = $4 AND "id" > $5)) ' +
+        'ORDER BY COALESCE("bio", $6) ASC, "id" ASC LIMIT 10',
+      params: ['', 'x', '', 'x', 5, ''],
+    });
+  });
+
+  it('AND-s a regular WHERE with the seek predicate (single key unwrapped)', () => {
+    expect(
+      buildSelect<Row>('users', pgDialect, {
+        where: { active: true },
+        keyset: { keys: [{ expr: { col: 'id' } }], after: [5], limit: 10 },
+      }),
+    ).toEqual({
+      sql:
+        'SELECT * FROM "users" WHERE "active" = $1 AND "id" > $2 ' +
+        'ORDER BY "id" ASC LIMIT 10',
+      params: [true, 5],
+    });
+  });
+
+  it('uses MSSQL OFFSET/FETCH (keyset always has ORDER BY)', () => {
+    expect(
+      buildSelect<Row>('users', mssqlDialect, {
+        keyset: {
+          keys: [{ expr: { col: 'age' } }, { expr: { col: 'id' } }],
+          after: [30, 100],
+          limit: 20,
+        },
+      }),
+    ).toEqual({
+      sql:
+        'SELECT * FROM [users] ' +
+        'WHERE ([age] > @p1 OR ([age] = @p2 AND [id] > @p3)) ' +
+        'ORDER BY [age] ASC, [id] ASC OFFSET 0 ROWS FETCH NEXT 20 ROWS ONLY',
+      params: [30, 30, 100],
+    });
+  });
+
+  it('rejects keyset combined with limit/offset', () => {
+    expect(() =>
+      buildSelect<Row>('users', pgDialect, {
+        limit: 5,
+        keyset: { keys: [{ expr: { col: 'id' } }], after: [1] },
+      }),
+    ).toThrow(/'keyset' cannot be combined with 'limit'\/'offset'/);
+  });
+
+  it('rejects an after-list whose length differs from keys', () => {
+    expect(() =>
+      buildSelect<Row>('users', pgDialect, {
+        keyset: {
+          keys: [{ expr: { col: 'age' } }, { expr: { col: 'id' } }],
+          after: [30],
+        },
+      }),
+    ).toThrow(/one value per key/);
+  });
+
+  it('rejects an empty keys array', () => {
+    expect(() =>
+      buildSelect<Row>('users', pgDialect, {
+        keyset: { keys: [], after: [] },
+      }),
+    ).toThrow(/keyset 'keys' cannot be empty/);
+  });
+});
+
 describe('buildInsert', () => {
   it('emits INSERT with the supplied columns', () => {
     expect(

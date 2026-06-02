@@ -1,6 +1,6 @@
 {
   "name": "altacore",
-  "version": "0.0.3",
+  "version": "0.1.0",
   "description": "Core level ORM for Nodejs Projects using MSSQL, mySQL or postgreSQL",
   "type": "module",
   "main": "./dist/index.cjs",

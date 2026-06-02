@@ -27,30 +27,105 @@ export type WhereOperators<V> = {
 // Bare null is also accepted (translated to IS NULL) for the same reason.
 export type WhereCondition<V> = V | null | WhereOperators<V>;
 
-// 'and' and 'or' are reserved group keys at the top level of a Where<T>;
-// columns named `and`/`or` cannot be filtered via the property syntax and must
-// be addressed inside a group instead.
+// 'and'/'or'/'exists'/'notExists' are reserved group keys at the top level of
+// a Where<T>; columns with those names cannot be filtered via the property
+// syntax and must be addressed inside a group instead.
+type ReservedWhereKey = 'and' | 'or' | 'exists' | 'notExists';
+
 type ColumnWhere<T> = {
-  [K in keyof T as K extends 'and' | 'or' ? never : K]?: WhereCondition<T[K]>;
+  [K in keyof T as K extends ReservedWhereKey ? never : K]?: WhereCondition<
+    T[K]
+  >;
+};
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+// A correlated [NOT] EXISTS subquery. `on` correlates outer column(s) with the
+// subquery's; `where` adds further filters scoped to the sub-table. The sub-row
+// type `S` is open (defaults to `any` in `Where`, mirroring how `AnyJoin`
+// leaves the joined row open) so the outer side stays typed (`keyof T`).
+export type ExistsSpec<T, S> = {
+  table: DbCore<S>;
+  on:
+    | readonly [keyof T & string, keyof S & string]
+    | readonly (readonly [keyof T & string, keyof S & string])[];
+  where?: Where<S>;
 };
 
 export type Where<T> = ColumnWhere<T> & {
   and?: readonly Where<T>[];
   or?: readonly Where<T>[];
+  exists?: ExistsSpec<T, any> | readonly ExistsSpec<T, any>[];
+  notExists?: ExistsSpec<T, any> | readonly ExistsSpec<T, any>[];
 };
+/* eslint-enable @typescript-eslint/no-explicit-any */
 
-export type OrderBy<T> = {
-  col: keyof T & string;
+// -----------------------------------------------------------------------------
+// Column references & expressions
+// -----------------------------------------------------------------------------
+// `M` is an alias→row map ({ [alias]: joinedRow }) derived from the joins on
+// the same call (see AliasMapOf below). When there are no joins it is the
+// empty map, so only outer-table refs are allowed — preserving single-table
+// behavior. A ColRef points at either an outer-table column (`{ col }`) or a
+// joined column (`{ alias, col }`); an Expr additionally allows a portable
+// COALESCE fallback, used for nullable-column ordering / keyset cursors.
+
+// `keyof EmptyAliasMap` is `never`, so the joined-ref branch of ColRef
+// collapses to `never` and only `{ col }` remains.
+type EmptyAliasMap = Record<never, never>;
+
+export type ColRef<T, M = EmptyAliasMap> =
+  | { col: keyof T & string }
+  | {
+      [A in keyof M]: { alias: A & string; col: keyof M[A] & string };
+    }[keyof M];
+
+export type Expr<T, M = EmptyAliasMap> =
+  | ColRef<T, M>
+  | { coalesce: readonly [ColRef<T, M>, string | number | boolean] };
+
+export type OrderBy<T, M = EmptyAliasMap> = Expr<T, M> & {
   direction?: 'asc' | 'desc';
 };
 
-export type SelectOptions<T> = {
+// Keyset (cursor) pagination. `keys` are the ordered sort expressions — they
+// may span the outer table and joined aliases, and use COALESCE for nullable
+// columns. `after` carries one cursor value per key (the last row of the
+// previous page). The same keys drive both the seek predicate and ORDER BY,
+// so the two can never disagree. `limit` caps the page; keyset cannot be
+// combined with the offset-based `limit`/`offset`.
+export type KeysetKey<T, M = EmptyAliasMap> = {
+  expr: Expr<T, M>;
+  direction?: 'asc' | 'desc';
+};
+
+export type Keyset<T, M = EmptyAliasMap> = {
+  keys: readonly KeysetKey<T, M>[];
+  after: readonly unknown[];
+  limit?: number;
+};
+
+// Aggregate output column. `as` names the result-row key. COUNT may take `'*'`
+// or a column expression (with optional DISTINCT); sum/avg/min/max take a
+// column expression; stringAgg joins values with `separator` (STRING_AGG on
+// pg/mssql, GROUP_CONCAT on mysql). All are standard SQL across the three
+// dialects. (Ordered/DISTINCT string aggregation is not yet supported.)
+export type Aggregate<T, M = EmptyAliasMap> =
+  | { fn: 'count'; arg: '*' | Expr<T, M>; distinct?: boolean; as: string }
+  | { fn: 'sum' | 'avg' | 'min' | 'max'; arg: Expr<T, M>; as: string }
+  | { fn: 'stringAgg'; arg: Expr<T, M>; separator: string; as: string };
+
+export type SelectOptions<T, M = EmptyAliasMap> = {
   where?: Where<T>;
   limit?: number;
   offset?: number;
-  orderBy?: OrderBy<T> | OrderBy<T>[];
+  orderBy?: OrderBy<T, M> | OrderBy<T, M>[];
   // Project a subset of columns. Omit to SELECT *.
   columns?: readonly (keyof T & string)[];
+  // Group rows for aggregate queries. Refs may target the outer table or any
+  // joined alias on the same call.
+  groupBy?: Expr<T, M> | readonly Expr<T, M>[];
+  // Keyset/cursor pagination — mutually exclusive with limit/offset.
+  keyset?: Keyset<T, M>;
 };
 
 // -----------------------------------------------------------------------------
@@ -118,11 +193,14 @@ type Optional<X, T extends JoinType | undefined> = T extends 'left' | 'full'
 // `[K] extends [keyof R]` (non-distributive) is load-bearing — the bare
 // `K extends keyof R` distributes over the column union, yielding
 // `Pick<R, 'a'> | Pick<R, 'b'>` instead of `Pick<R, 'a' | 'b'>`.
+// `C` omitted (no `select.columns`) → the join projects nothing, contributing
+// an empty entry to the result row. Such joins exist only to be referenced by
+// ON/where/aggregates (e.g. STRING_AGG over an unprojected joined column).
 type ProjectColumns<R, C> = C extends readonly (infer K)[]
   ? [K] extends [keyof R]
     ? Pick<R, K>
     : never
-  : R;
+  : Record<never, never>;
 
 type JoinedRow<J> = J extends JoinSpec<any, infer R, any>
   ? ProjectColumns<
@@ -150,6 +228,44 @@ type JoinAliasEntry<J> = J extends JoinSpec<any, any, infer A>
 type AllJoinEntries<J extends readonly AnyJoin<any>[]> = UnionToIntersection<
   { [I in keyof J]: JoinAliasEntry<J[I]> }[number]
 >;
+
+// Alias→row map for ColRef/Expr targeting. Exposes the FULL joined row (not
+// just `select.columns`): orderBy/groupBy/keyset/aggregate refs may address any
+// column of a joined table regardless of what's projected — e.g. STRING_AGG
+// over a joined column that isn't returned per-row. No LEFT/FULL `Optional`
+// wrapper, since a ref addresses the column whether or not the row is present.
+type AliasMapEntry<J> = J extends JoinSpec<any, infer R, infer A>
+  ? { [K in A]: R }
+  : {};
+
+export type AliasMapOf<J> = J extends readonly AnyJoin<any>[]
+  ? UnionToIntersection<{ [I in keyof J]: AliasMapEntry<J[I]> }[number]>
+  : AliasMapEntry<J>;
+
+// Output value type of one aggregate. count/sum/avg are numeric; min/max
+// preserve the column type for a plain outer-column arg (e.g. a Date stays a
+// Date), falling back to `unknown` for aliased/coalesced args we can't resolve.
+type AggValue<T, Item> = Item extends { fn: 'count' | 'sum' | 'avg' }
+  ? number
+  : Item extends { fn: 'stringAgg' }
+    ? string
+    : Item extends { fn: 'min' | 'max'; arg: { col: infer C } }
+      ? C extends keyof T
+        ? T[C]
+        : unknown
+      : unknown;
+
+// Maps an aggregates tuple to `{ [as]: value }`. Empty tuple → identity (`{}`)
+// so the non-aggregated overloads keep returning exactly their row type.
+type AggregateOut<T, A> = A extends readonly []
+  ? EmptyAliasMap
+  : A extends readonly (infer Item)[]
+    ? UnionToIntersection<
+        Item extends { as: infer N extends string }
+          ? { [K in N]: AggValue<T, Item> }
+          : never
+      >
+    : EmptyAliasMap;
 /* eslint-enable @typescript-eslint/no-explicit-any */
 
 type OuterRow<T, K> = [K] extends [never]
@@ -180,23 +296,46 @@ export type DeleteOptions<T> = {
 // `select.columns: ['id', ...]` widens to `string[]` (collapsing the
 // projected Pick to `never`).
 export type SelectFn<T> = {
-  // Single join object.
-  <K extends keyof T & string, const J extends AnyJoin<T>>(
-    options: SelectOptions<T> & { columns?: readonly K[]; join: J },
-  ): Promise<Array<OuterRow<T, K> & JoinAliasEntry<J>>>;
+  // Single join object. `AliasMapOf<J>` is threaded into the options so
+  // orderBy/groupBy/keyset/aggregate refs can target the joined alias by name.
+  // `A` captures the aggregates tuple so each `as` becomes a typed row key.
+  <
+    K extends keyof T & string,
+    const J extends AnyJoin<T>,
+    const A extends readonly Aggregate<T, AliasMapOf<J>>[] = readonly [],
+  >(
+    options: SelectOptions<T, AliasMapOf<J>> & {
+      columns?: readonly K[];
+      join: J;
+      aggregates?: A;
+    },
+  ): Promise<Array<OuterRow<T, K> & JoinAliasEntry<J> & AggregateOut<T, A>>>;
 
   // Array of joins.
-  <K extends keyof T & string, const J extends readonly AnyJoin<T>[]>(
-    options: SelectOptions<T> & { columns?: readonly K[]; join: J },
-  ): Promise<Array<OuterRow<T, K> & AllJoinEntries<J>>>;
+  <
+    K extends keyof T & string,
+    const J extends readonly AnyJoin<T>[],
+    const A extends readonly Aggregate<T, AliasMapOf<J>>[] = readonly [],
+  >(
+    options: SelectOptions<T, AliasMapOf<J>> & {
+      columns?: readonly K[];
+      join: J;
+      aggregates?: A;
+    },
+  ): Promise<Array<OuterRow<T, K> & AllJoinEntries<J> & AggregateOut<T, A>>>;
 
-  // No-join, with column projection — narrows return to Pick<T, K>[].
-  <K extends keyof T & string>(
-    options: SelectOptions<T> & { columns: readonly K[] },
-  ): Promise<Pick<T, K>[]>;
+  // No-join, with column projection.
+  <
+    K extends keyof T & string,
+    const A extends readonly Aggregate<T>[] = readonly [],
+  >(
+    options: SelectOptions<T> & { columns: readonly K[]; aggregates?: A },
+  ): Promise<Array<Pick<T, K> & AggregateOut<T, A>>>;
 
   // No-join, no projection.
-  (options?: SelectOptions<T>): Promise<T[]>;
+  <const A extends readonly Aggregate<T>[] = readonly []>(
+    options?: SelectOptions<T> & { aggregates?: A },
+  ): Promise<Array<T & AggregateOut<T, A>>>;
 };
 
 // Mirrors SelectFn<T> but wraps each row array in `{ rows; total }`. `total`
@@ -205,30 +344,49 @@ export type SelectFn<T> = {
 // it counts join-result rows (same as count() over a join).
 export type SelectWithCountFn<T> = {
   // Single join object.
-  <K extends keyof T & string, const J extends AnyJoin<T>>(
-    options: SelectOptions<T> & { columns?: readonly K[]; join: J },
+  <
+    K extends keyof T & string,
+    const J extends AnyJoin<T>,
+    const A extends readonly Aggregate<T, AliasMapOf<J>>[] = readonly [],
+  >(
+    options: SelectOptions<T, AliasMapOf<J>> & {
+      columns?: readonly K[];
+      join: J;
+      aggregates?: A;
+    },
   ): Promise<{
-    rows: Array<OuterRow<T, K> & JoinAliasEntry<J>>;
+    rows: Array<OuterRow<T, K> & JoinAliasEntry<J> & AggregateOut<T, A>>;
     total: number;
   }>;
 
   // Array of joins.
-  <K extends keyof T & string, const J extends readonly AnyJoin<T>[]>(
-    options: SelectOptions<T> & { columns?: readonly K[]; join: J },
+  <
+    K extends keyof T & string,
+    const J extends readonly AnyJoin<T>[],
+    const A extends readonly Aggregate<T, AliasMapOf<J>>[] = readonly [],
+  >(
+    options: SelectOptions<T, AliasMapOf<J>> & {
+      columns?: readonly K[];
+      join: J;
+      aggregates?: A;
+    },
   ): Promise<{
-    rows: Array<OuterRow<T, K> & AllJoinEntries<J>>;
+    rows: Array<OuterRow<T, K> & AllJoinEntries<J> & AggregateOut<T, A>>;
     total: number;
   }>;
 
   // No-join, with column projection.
-  <K extends keyof T & string>(
-    options: SelectOptions<T> & { columns: readonly K[] },
-  ): Promise<{ rows: Pick<T, K>[]; total: number }>;
+  <
+    K extends keyof T & string,
+    const A extends readonly Aggregate<T>[] = readonly [],
+  >(
+    options: SelectOptions<T> & { columns: readonly K[]; aggregates?: A },
+  ): Promise<{ rows: Array<Pick<T, K> & AggregateOut<T, A>>; total: number }>;
 
   // No-join, no projection.
-  (
-    options?: SelectOptions<T>,
-  ): Promise<{ rows: T[]; total: number }>;
+  <const A extends readonly Aggregate<T>[] = readonly []>(
+    options?: SelectOptions<T> & { aggregates?: A },
+  ): Promise<{ rows: Array<T & AggregateOut<T, A>>; total: number }>;
 };
 
 export type DbCore<T> = {
@@ -246,6 +404,27 @@ export type DbCore<T> = {
   delete: (options: DeleteOptions<T>) => Promise<number>;
 };
 
+const NUMERIC_AGG_FNS: ReadonlySet<string> = new Set(['count', 'sum', 'avg']);
+
+// In place, coerce count/sum/avg outputs from driver-native strings (pg's
+// bigint/numeric) to numbers. Aggregate `as` keys are top-level on every row
+// (joined or flat), so this runs after nesting.
+function coerceNumericAggregates(
+  rows: Array<Record<string, unknown>>,
+  aggregates: ReadonlyArray<{ fn: string; as: string }> | undefined,
+): void {
+  const numericKeys = (aggregates ?? [])
+    .filter((a) => NUMERIC_AGG_FNS.has(a.fn))
+    .map((a) => a.as);
+  if (numericKeys.length === 0) return;
+  for (const row of rows) {
+    for (const key of numericKeys) {
+      const v = row[key];
+      if (v !== null && v !== undefined) row[key] = Number(v);
+    }
+  }
+}
+
 export function createDbCore<T>(db: Database, table: string): DbCore<T> {
   const driver = db.driver;
   const dialect = driver.dialect;
@@ -259,11 +438,23 @@ export function createDbCore<T>(db: Database, table: string): DbCore<T> {
   // restore each public multi-overload type.
   const doSelect = async (options?: SelectInput<T>) => {
     const joins = options?.join;
-    if (joins) assertJoinColumns(joins);
+    // Normally every join must project columns. But in an aggregate/grouped
+    // query a join may exist purely to feed an aggregate (e.g. STRING_AGG over
+    // a joined column) and project nothing — so columns can't be grouped and
+    // must be omitted. Skip the projection requirement in that case.
+    if (joins && !options?.aggregates && !options?.groupBy) {
+      assertJoinColumns(joins);
+    }
     const { sql, params } = buildSelect<T>(table, dialect, options);
     const result = await driver.query<Record<string, unknown>>(sql, params);
-    if (!joins) return result.rows as unknown as T[];
-    return result.rows.map((r) => nestJoinedRow(r, joins));
+    const rows = joins
+      ? result.rows.map((r) => nestJoinedRow(r, joins))
+      : result.rows;
+    // Same rationale as count(): pg returns COUNT/SUM/AVG as bigint/numeric
+    // strings. Coerce those aggregate outputs to numbers (their typed result
+    // shape). min/max are left as-is — they preserve the source column type.
+    if (options?.aggregates) coerceNumericAggregates(rows, options.aggregates);
+    return rows as unknown as T[];
   };
 
   const select = doSelect as unknown as SelectFn<T>;
