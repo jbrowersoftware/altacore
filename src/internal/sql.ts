@@ -462,6 +462,28 @@ export function buildSelect<T>(
 // implementation detail, never visible to consumers.
 const PAGE_ALIAS = 'page';
 
+// The inner pagination subquery selects the outer table alone, so an orderBy
+// entry that references a joined alias (`{ alias, col }`, or a `coalesce` over
+// one) is unbound there — the alias only exists in the outer wrapper, around
+// the join. Keep only outer-table refs for the inner ORDER BY; the full
+// ordering is still applied on the outer wrapper. (Ordering the *page
+// selection* by a joined column isn't expressible under subquery-wrap
+// pagination — use keyset pagination for cross-table cursors.)
+function outerOnlyOrderBy<T>(
+  orderBy: SelectInput<T>['orderBy'],
+): SelectInput<T>['orderBy'] {
+  if (!orderBy) return orderBy;
+  const list = Array.isArray(orderBy) ? orderBy : [orderBy];
+  return list.filter((o) => {
+    const entry = o as {
+      alias?: string;
+      coalesce?: readonly [{ alias?: string }, unknown];
+    };
+    const ref = entry.coalesce ? entry.coalesce[0] : entry;
+    return ref.alias === undefined;
+  });
+}
+
 function buildSelectPaginatedJoin<T>(
   table: string,
   dialect: SqlDialect,
@@ -474,7 +496,9 @@ function buildSelectPaginatedJoin<T>(
   // projection. Worth it for v1 simplicity.
   const subquery = buildSelectFlat(table, dialect, {
     where: options.where,
-    orderBy: options.orderBy,
+    // Outer-table refs only — alias-qualified refs are unbound inside the
+    // subquery (they resolve only on the outer wrapper, below).
+    orderBy: outerOnlyOrderBy(options.orderBy),
     limit: options.limit,
     offset: options.offset,
   });

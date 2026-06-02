@@ -531,6 +531,73 @@ describe('buildSelect with joins', () => {
     expect(out.sql.endsWith('ORDER BY "page"."id" DESC')).toBe(true);
   });
 
+  it('paginated join keeps an alias-qualified orderBy out of the inner subquery', () => {
+    // Regression: the joined alias only exists in the outer wrapper, not the
+    // inner pagination subquery. Emitting "o"."total" inside the subquery
+    // throws "multi-part identifier could not be bound" on SQL Server.
+    const out = buildSelect<Row>('users', pgDialect, {
+      columns: ['id'],
+      join: {
+        table: orders,
+        alias: 'o',
+        on: ['id', 'userId'],
+        select: { columns: ['total'] },
+      },
+      orderBy: { alias: 'o', col: 'total', direction: 'desc' },
+      limit: 10,
+    });
+    // Inner subquery has NO ORDER BY (the only entry referenced a joined alias).
+    expect(out.sql).toContain('(SELECT * FROM "users" LIMIT 10) AS "page"');
+    // Outer wrapper orders by the joined alias, which is bound there.
+    expect(out.sql.endsWith('ORDER BY "o"."total" DESC')).toBe(true);
+  });
+
+  it('paginated join: inner ORDER BY keeps outer refs, drops joined refs; outer keeps both', () => {
+    const out = buildSelect<Row>('users', pgDialect, {
+      columns: ['id'],
+      join: {
+        table: orders,
+        alias: 'o',
+        on: ['id', 'userId'],
+        select: { columns: ['total'] },
+      },
+      orderBy: [
+        { col: 'age', direction: 'desc' },
+        { alias: 'o', col: 'total' },
+      ],
+      limit: 10,
+    });
+    // Inner: only the outer column drives pagination.
+    expect(out.sql).toContain(
+      '(SELECT * FROM "users" ORDER BY "age" DESC LIMIT 10) AS "page"',
+    );
+    // Outer: full ordering — outer col via page alias, joined col via its alias.
+    expect(out.sql.endsWith('ORDER BY "page"."age" DESC, "o"."total" ASC')).toBe(
+      true,
+    );
+  });
+
+  it('paginated join on mssql: all-joined orderBy leaves inner with synthetic order', () => {
+    const out = buildSelect<Row>('users', mssqlDialect, {
+      columns: ['id'],
+      join: {
+        table: orders,
+        alias: 'o',
+        on: ['id', 'userId'],
+        select: { columns: ['total'] },
+      },
+      orderBy: { alias: 'o', col: 'total', direction: 'desc' },
+      limit: 10,
+      offset: 5,
+    });
+    // The joined ref can't live in the subquery; MSSQL still requires an
+    // ORDER BY for OFFSET/FETCH, so the synthetic one is emitted there.
+    expect(out.sql).toContain(
+      '(SELECT * FROM [users] ORDER BY (SELECT NULL) OFFSET 5 ROWS FETCH NEXT 10 ROWS ONLY) AS [page]',
+    );
+    expect(out.sql.endsWith('ORDER BY [o].[total] DESC')).toBe(true);
+  });
+
   it('paginated join with no outer columns falls back to page.*', () => {
     const out = buildSelect<Row>('users', pgDialect, {
       join: {

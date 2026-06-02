@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-06-02
+
+### Fixed
+
+- **Offset pagination over a join no longer emits an unbound joined-alias reference in the inner pagination subquery's `ORDER BY`.** When `select({ join, limit/offset, orderBy })` ordered by a joined column (`{ alias, col }`, or a `COALESCE` over one), that ref was passed verbatim into the outer-table-only subquery, producing e.g. `ORDER BY "l"."CustomerNumber"` where the alias was unbound — SQL Server raised "the multi-part identifier could not be bound." Alias-qualified `orderBy` entries are now dropped from the inner subquery (they still apply on the outer wrapper, where the join exists); MSSQL falls back to its synthetic `ORDER BY (SELECT NULL)` when no outer-column key remains. For pagination whose primary sort is a joined column, use keyset pagination.
+
 ## [0.1.0] - 2026-06-02
 
 ### Breaking changes

@@ -370,6 +370,8 @@ ORDER BY "page"."id" ASC
 
 The inner subquery drives the pagination; the outer `ORDER BY` keeps result rows in the same outer order after the join's row expansion. For LEFT/FULL joins, each of the 10 outer rows appears once (with or without joined data). For INNER joins, outer rows whose join doesn't match are filtered, so a page may contain fewer than 10 outer rows.
 
+`orderBy` may reference a joined alias here, but only on the **outer** ordering — the alias doesn't exist inside the pagination subquery, so an alias-qualified entry is dropped from the inner `ORDER BY` (it can't influence which outer rows land on the page). If you need the page **selection** itself ordered by a joined column (a cross-table cursor), use [keyset pagination](#keyset-cursor-pagination), which emits one flat join and seeks across both tables at once.
+
 #### `count` with joins
 
 `count()` accepts the same `join` shape. Projections are ignored — only the JOIN/ON/WHERE structure affects the count.
