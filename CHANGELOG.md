@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.0.3] - 2026-05-13
 
+### Breaking changes
+
+- **`DbCore<T>` shape adds two required fields: `readonly tableName: string` and `selectWithCount: SelectWithCountFn<T>`.** Consumers who construct or mock `DbCore<T>` objects manually (test doubles, alternative implementations) must add both. Code that obtains `DbCore<T>` via `createDbCore()` is unaffected — the factory populates them automatically.
+- **`SelectFn<T>` overload set expanded from 2 to 4** (added single-join and array-join overloads ahead of the existing column-projection and bare overloads). Every existing call pattern still resolves to the same overload and the same return type. Only impact: code that declares a variable typed as `SelectFn<T>` and assigns a function not handling the new overloads will fail to type-check.
+
 ### Added
 
 - Typed `join` option on `select()` and `count()`. A `JoinSpec` carries `table`, `type` (`'inner'` (default) | `'left'` | `'right'` | `'full'`), `alias`, `on` (single tuple or array of tuples for multi-column ON), and a nested `select` describing the joined-table projection, filters, and further nested joins. `join` accepts either one `JoinSpec` or an array.
