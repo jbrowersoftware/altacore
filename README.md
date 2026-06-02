@@ -2,7 +2,7 @@
 
 A lightweight, easy-to-use ORM framework for Node.js applications working with **Microsoft SQL Server**, **MySQL**, and **PostgreSQL**.
 
-> **Status:** pre-1.0, in active development. Working today: typed CRUD via `createDbCore` (select with column projection, count, insert, update, delete), typed joins (inner / left / right / full, multi-column ON, nested joins, array of joins, count over a join) with nested-by-alias result rows, the typed `where` builder, `orderBy`, all three drivers (MSSQL, MySQL, PostgreSQL), row-returning insert/update via `RETURNING` (pg) and `OUTPUT INSERTED.*` (mssql), and connection pool config passthrough.
+> **Status:** pre-1.0, in active development. Working today: typed CRUD via `createDbCore` (select with column projection, count, insert, update, delete), typed joins (inner / left / right / full, multi-column ON, nested joins, array of joins, count over a join) with nested-by-alias result rows, subquery-wrapped pagination over joins, `selectWithCount` for paginated page + total in one call, the typed `where` builder, `orderBy`, all three drivers (MSSQL, MySQL, PostgreSQL), row-returning insert/update via `RETURNING` (pg) and `OUTPUT INSERTED.*` (mssql), and connection pool config passthrough.
 
 ## Why Altacore
 
@@ -95,6 +95,16 @@ const usersWithLatestPaidOrder = await users.select({
 });
 // Each row: { id, email, o: { id, total } | undefined }
 
+// PAGINATED select + total in one call — runs the page query and the count
+// query in parallel (count drops limit/offset). Useful for paginated UIs.
+const { rows, total } = await users.selectWithCount({
+  where: { active: true },
+  orderBy: { col: 'id' },
+  limit: 25,
+  offset: 0,
+});
+// rows: User[] (first 25 active users), total: total active-user count
+
 // INSERT — returns the inserted row (pg/mssql) or echoes input (mysql)
 const created = await users.insert({
   email: 'a@b.com',
@@ -144,6 +154,39 @@ const active = await users.count({ where: { active: true } });
 ```
 
 PostgreSQL returns `COUNT(*)` as a bigint string at the driver layer; Altacore coerces it so you always get a `number`.
+
+### Paginated select with total count
+
+`selectWithCount(options?)` runs the same arguments through `select` and `count` in parallel and returns `{ rows, total }`. The count query drops `limit` and `offset` so `total` is the unpaginated count; `where`, `join`, and the rest are honored on both sides.
+
+```ts
+const { rows, total } = await users.selectWithCount({
+  where: { active: true },
+  orderBy: { col: 'id' },
+  limit: 25,
+  offset: page * 25,
+});
+// rows: User[] (≤25 entries), total: total active users for pagination UI
+```
+
+Overloads mirror `select` end-to-end: column projection narrows `rows`, joins nest by alias under `rows`, the return is still `{ rows, total }`.
+
+```ts
+const { rows, total } = await users.selectWithCount({
+  columns: ['id', 'email'],
+  join: {
+    table: orders,
+    type: 'left',
+    alias: 'o',
+    on: ['id', 'userId'],
+    select: { columns: ['id', 'total'] },
+  },
+  limit: 10,
+});
+// rows: Array<{ id; email; o: { id; total } | undefined }>, total: number
+```
+
+When `limit` / `offset` are combined with `join`, Altacore subquery-wraps the outer table so pagination applies to **outer rows**, not join-expanded result rows — see the "Joining tables" section for the LEFT/INNER detail and the 1:N caveat that affects `total`.
 
 ### Joining tables
 
@@ -294,6 +337,39 @@ await users.select({
 // Each row: { id, o: { total }, p: { bio } | undefined }
 ```
 
+#### Pagination over joins
+
+When `limit` / `offset` are combined with `join`, Altacore wraps the outer table in a derived subquery so the page applies to **outer rows**, not join-expanded result rows. This is the difference between "first 10 users (with all their joined data)" and "first 10 user-order pairs."
+
+```ts
+await users.select({
+  columns: ['id'],
+  where: { active: true },
+  orderBy: { col: 'id' },
+  join: {
+    table: orders,
+    type: 'left',
+    alias: 'o',
+    on: ['id', 'userId'],
+    select: { columns: ['id', 'total'] },
+  },
+  limit: 10,
+});
+```
+
+Emitted SQL (pg):
+
+```sql
+SELECT "page"."id", "o"."id" AS "o.id", "o"."total" AS "o.total"
+FROM (
+  SELECT * FROM "users" WHERE "active" = $1 ORDER BY "id" ASC LIMIT 10
+) AS "page"
+LEFT JOIN "orders" AS "o" ON "page"."id" = "o"."userId"
+ORDER BY "page"."id" ASC
+```
+
+The inner subquery drives the pagination; the outer `ORDER BY` keeps result rows in the same outer order after the join's row expansion. For LEFT/FULL joins, each of the 10 outer rows appears once (with or without joined data). For INNER joins, outer rows whose join doesn't match are filtered, so a page may contain fewer than 10 outer rows.
+
 #### `count` with joins
 
 `count()` accepts the same `join` shape. Projections are ignored — only the JOIN/ON/WHERE structure affects the count.
@@ -318,6 +394,7 @@ Note: `COUNT(*)` over a join counts joined rows. A user with three paid orders c
 - **Outer `where` columns can't reference joined columns yet.** If you need to filter the result set against a joined column, either switch the join to `inner` (if dropping unmatched outer rows is the goal) or wait for a future dotted-key / `having` mechanism.
 - **`orderBy` is outer-only.** Ordering by a joined column isn't expressible in v1.
 - **Don't use column names containing `.`** when joining — the result mapper splits keys on dots to nest. Source columns with literal dots in their names will be misinterpreted.
+- **1:N joins still duplicate outer rows in the result.** Altacore's nested-by-alias result shape carries a single joined row per alias slot, so a 1:N join produces multiple result rows that share an outer row (each pairing it with a different joined match). Pagination correctly limits **outer rows** in the subquery, but `result.length` can exceed your page size when 1:N expands. For the same reason, `count()` (and `selectWithCount`'s `total`) counts join-result rows, not distinct outer rows. If your domain is genuinely 1:N and you need array-shaped joined data, that's not modeled in v1.
 
 ### Where clause operators
 
@@ -380,7 +457,8 @@ When you `orderBy` on MSSQL with `limit`/`offset`, your ordering is used directl
 
 ### Per-driver return shapes
 
-- `select(...)` returns `T[]` (or `Pick<T, K>[]` with column projection) on every driver. With `join`, rows include a `{ [alias]: <projected joined row> }` slot per join, `| undefined` for LEFT/FULL no-matches.
+- `select(...)` returns `T[]` (or `Pick<T, K>[]` with column projection) on every driver. With `join`, rows include a `{ [alias]: <projected joined row> }` slot per join, `| undefined` for LEFT/FULL no-matches. With `limit`/`offset` + `join`, the outer table is subquery-wrapped so pagination applies to outer rows.
+- `selectWithCount(...)` returns `{ rows, total }` on every driver — `rows` is whatever `select(...)` would return for the same options; `total` is `count(...)` over the same `where` + `join` with `limit`/`offset` dropped.
 - `count(...)` returns `number` on every driver. `join` is accepted and counts the joined result rows.
 - `insert(values: Partial<T>)` returns `T`:
   - **pg** uses `RETURNING *` — the row reflects DB-applied defaults, autogen IDs, and trigger-modified values.

@@ -26,7 +26,7 @@ function makeFakeDb(
   return { db: { driver }, calls };
 }
 
-type Row = { id: number; name: string; age: number };
+type Row = { id: number; name: string; age: number; active: boolean };
 
 describe('createDbCore', () => {
   it('select composes SELECT and forwards rows', async () => {
@@ -264,5 +264,160 @@ describe('createDbCore', () => {
     const { db } = makeFakeDb([], 0);
     const orders = createDbCore<{ id: number }>(db, 'orders');
     expect(orders.tableName).toBe('orders');
+  });
+
+  // selectWithCount needs the driver to return different rows for the page
+  // query and the count query. Branch on SQL content.
+  function makeSplitFakeDb(
+    pageRows: unknown[],
+    total: number,
+  ): { db: Database; calls: Captured[] } {
+    const calls: Captured[] = [];
+    const driver: Driver = {
+      kind: 'pg',
+      dialect: pgDialect,
+      query<R>(
+        sql: string,
+        params: readonly unknown[],
+      ): Promise<QueryResult<R>> {
+        calls.push({ sql, params: [...params] });
+        if (sql.startsWith('SELECT COUNT(*)')) {
+          return Promise.resolve({
+            rows: [{ count: total }] as unknown as R[],
+            rowCount: 1,
+          });
+        }
+        return Promise.resolve({
+          rows: pageRows as R[],
+          rowCount: pageRows.length,
+        });
+      },
+      async close() {},
+    };
+    return { db: { driver }, calls };
+  }
+
+  it('selectWithCount returns { rows, total } and issues both queries', async () => {
+    const { db, calls } = makeSplitFakeDb(
+      [
+        { id: 1, name: 'a', age: 30 },
+        { id: 2, name: 'b', age: 31 },
+      ],
+      42,
+    );
+    const things = createDbCore<Row>(db, 'things');
+
+    const out = await things.selectWithCount({
+      where: { active: true },
+      limit: 2,
+      offset: 0,
+    });
+
+    expect(out.total).toBe(42);
+    expect(out.rows).toEqual([
+      { id: 1, name: 'a', age: 30 },
+      { id: 2, name: 'b', age: 31 },
+    ]);
+    expect(calls).toHaveLength(2);
+  });
+
+  it('selectWithCount drops limit/offset from the count query', async () => {
+    const { db, calls } = makeSplitFakeDb([{ id: 1, name: 'a', age: 30 }], 17);
+    const things = createDbCore<Row>(db, 'things');
+
+    await things.selectWithCount({
+      where: { active: true },
+      limit: 10,
+      offset: 20,
+    });
+
+    const selectCall = calls.find((c) => c.sql.startsWith('SELECT *'));
+    const countCall = calls.find((c) => c.sql.startsWith('SELECT COUNT'));
+
+    expect(selectCall?.sql).toContain('LIMIT 10');
+    expect(selectCall?.sql).toContain('OFFSET 20');
+    expect(countCall?.sql).not.toContain('LIMIT');
+    expect(countCall?.sql).not.toContain('OFFSET');
+    // The where clause appears in both.
+    expect(selectCall?.params).toEqual([true]);
+    expect(countCall?.params).toEqual([true]);
+  });
+
+  it('selectWithCount + join nests rows and counts join-result rows', async () => {
+    type Order = { id: number; userId: number; total: number };
+    const { db, calls } = makeSplitFakeDb(
+      [{ id: 1, name: 'a', age: 30, 'o.id': 10, 'o.total': 100 }],
+      5,
+    );
+    const things = createDbCore<Row>(db, 'things');
+    const orders = createDbCore<Order>(db, 'orders');
+
+    const out = await things.selectWithCount({
+      columns: ['id', 'name'],
+      join: {
+        table: orders,
+        type: 'left',
+        alias: 'o',
+        on: ['id', 'userId'],
+        select: { columns: ['id', 'total'] },
+      },
+      limit: 1,
+    });
+
+    expect(out.total).toBe(5);
+    expect(out.rows).toEqual([
+      { id: 1, name: 'a', age: 30, o: { id: 10, total: 100 } },
+    ]);
+    // Page query: subquery-wrapped because limit is present.
+    const pageCall = calls.find((c) => c.sql.includes('AS "page"'));
+    expect(pageCall).toBeDefined();
+    // Count query: COUNT(*) over the join, no LIMIT.
+    const countCall = calls.find((c) => c.sql.startsWith('SELECT COUNT'));
+    expect(countCall?.sql).toContain('LEFT JOIN "orders"');
+    expect(countCall?.sql).not.toContain('LIMIT');
+  });
+
+  it('selectWithCount runs the two queries in parallel', async () => {
+    // Verify Promise.all is used — both queries reach the driver before
+    // either resolves. Resolve them in reverse arrival order to make sure
+    // the result still wires up to the right side.
+    const calls: Captured[] = [];
+    const resolvers: Array<(v: unknown) => void> = [];
+    const driver: Driver = {
+      kind: 'pg',
+      dialect: pgDialect,
+      query<R>(
+        sql: string,
+        params: readonly unknown[],
+      ): Promise<QueryResult<R>> {
+        calls.push({ sql, params: [...params] });
+        return new Promise<QueryResult<R>>((resolve) => {
+          resolvers.push((v) => resolve(v as QueryResult<R>));
+        });
+      },
+      async close() {},
+    };
+    const things = createDbCore<Row>({ driver }, 'things');
+
+    const promise = things.selectWithCount({ where: { active: true } });
+
+    // Both queries should have been issued before either resolves.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(calls).toHaveLength(2);
+
+    // Resolve the count first, then the select — Promise.all should still
+    // assemble them in the right slots.
+    const countIdx = calls.findIndex((c) => c.sql.startsWith('SELECT COUNT'));
+    const selectIdx = 1 - countIdx;
+    resolvers[countIdx]!({ rows: [{ count: 99 }], rowCount: 1 });
+    resolvers[selectIdx]!({
+      rows: [{ id: 1, name: 'a', age: 30 }],
+      rowCount: 1,
+    });
+
+    const out = await promise;
+    expect(out.total).toBe(99);
+    expect(out.rows).toEqual([{ id: 1, name: 'a', age: 30 }]);
   });
 });

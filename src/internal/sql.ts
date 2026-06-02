@@ -228,6 +228,15 @@ export function buildSelect<T>(
     return buildSelectFlat(table, dialect, options);
   }
 
+  // Paginated joins: subquery-wrap the outer table so LIMIT/OFFSET applies
+  // to outer rows, not join-expanded result rows. Without the wrap, a 1:N
+  // join with LIMIT 10 would return the first 10 join-pairs (a fraction of
+  // outer rows). With it, LIMIT 10 inside the subquery limits outer rows
+  // first, then joins fan out per matched outer row.
+  if (options?.limit !== undefined || options?.offset !== undefined) {
+    return buildSelectPaginatedJoin(table, dialect, options, joins);
+  }
+
   const tableQ = dialect.quoteIdentifier(table);
 
   // Outer projection — qualified by the outer table name. When columns is
@@ -260,20 +269,76 @@ export function buildSelect<T>(
 
   const orderClause = formatOrderBy(options?.orderBy, dialect, table);
 
-  if (options?.limit !== undefined) ensureNonNegInt(options.limit, 'limit');
-  if (options?.offset !== undefined) ensureNonNegInt(options.offset, 'offset');
-
   let sql = `SELECT ${projections.join(', ')} FROM ${tableQ}`;
   if (joinChunk.sql) sql += ` ${joinChunk.sql}`;
   if (whereR.sql) sql += ` WHERE ${whereR.sql}`;
   sql += orderClause;
-  sql += dialect.formatLimitOffset(
-    options?.limit,
-    options?.offset,
-    orderClause !== '',
-  );
 
   return { sql, params: [...joinChunk.params, ...whereR.params] };
+}
+
+// The subquery `AS page` alias is the parent qualifier for the outermost
+// joins' ON pairs and the outer projection prefix — it's an internal
+// implementation detail, never visible to consumers.
+const PAGE_ALIAS = 'page';
+
+function buildSelectPaginatedJoin<T>(
+  table: string,
+  dialect: SqlDialect,
+  options: SelectInput<T>,
+  joins: readonly AnyJoinInput[],
+): SqlBuilt {
+  // The inner subquery uses SELECT * so any column referenced by a join's
+  // ON pair (or the outer projection) is available on the `page` alias.
+  // Trade-off: the subquery materializes all outer columns regardless of
+  // projection. Worth it for v1 simplicity.
+  const subquery = buildSelectFlat(table, dialect, {
+    where: options.where,
+    orderBy: options.orderBy,
+    limit: options.limit,
+    offset: options.offset,
+  });
+
+  const pageQ = dialect.quoteIdentifier(PAGE_ALIAS);
+
+  // Outer projection — qualify by the subquery alias.
+  const projections: string[] = [];
+  const outerCols = options.columns;
+  if (outerCols === undefined) {
+    projections.push(`${pageQ}.*`);
+  } else {
+    if (outerCols.length === 0) {
+      throw new TypeError(
+        `altacore: select 'columns' cannot be empty. ` +
+          `Omit the property to select all columns.`,
+      );
+    }
+    for (const c of outerCols) {
+      projections.push(`${pageQ}.${dialect.quoteIdentifier(c)}`);
+    }
+  }
+
+  // Joins reference `page` (not the original table name) as the parent
+  // qualifier. Param numbering continues past the subquery's params.
+  const joinChunk = buildJoinChain(
+    PAGE_ALIAS,
+    '',
+    joins,
+    dialect,
+    subquery.params.length,
+  );
+  projections.push(...joinChunk.projections);
+
+  // Outer ORDER BY for result-row ordering (the inner ORDER BY drives the
+  // pagination, but the join's row expansion can reshuffle without an
+  // outer ORDER BY). Qualify with the page alias to disambiguate.
+  const outerOrderClause = formatOrderBy(options.orderBy, dialect, PAGE_ALIAS);
+
+  let sql = `SELECT ${projections.join(', ')} FROM (${subquery.sql}) AS ${pageQ}`;
+  if (joinChunk.sql) sql += ` ${joinChunk.sql}`;
+  sql += outerOrderClause;
+
+  return { sql, params: [...subquery.params, ...joinChunk.params] };
 }
 
 function buildSelectFlat<T>(

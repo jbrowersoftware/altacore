@@ -199,12 +199,47 @@ export type SelectFn<T> = {
   (options?: SelectOptions<T>): Promise<T[]>;
 };
 
+// Mirrors SelectFn<T> but wraps each row array in `{ rows; total }`. `total`
+// is the count of rows matching the same where/join with limit/offset
+// dropped — for 1:0..1 joins it equals the outer-row count; for 1:N joins
+// it counts join-result rows (same as count() over a join).
+export type SelectWithCountFn<T> = {
+  // Single join object.
+  <K extends keyof T & string, const J extends AnyJoin<T>>(
+    options: SelectOptions<T> & { columns?: readonly K[]; join: J },
+  ): Promise<{
+    rows: Array<OuterRow<T, K> & JoinAliasEntry<J>>;
+    total: number;
+  }>;
+
+  // Array of joins.
+  <K extends keyof T & string, const J extends readonly AnyJoin<T>[]>(
+    options: SelectOptions<T> & { columns?: readonly K[]; join: J },
+  ): Promise<{
+    rows: Array<OuterRow<T, K> & AllJoinEntries<J>>;
+    total: number;
+  }>;
+
+  // No-join, with column projection.
+  <K extends keyof T & string>(
+    options: SelectOptions<T> & { columns: readonly K[] },
+  ): Promise<{ rows: Pick<T, K>[]; total: number }>;
+
+  // No-join, no projection.
+  (
+    options?: SelectOptions<T>,
+  ): Promise<{ rows: T[]; total: number }>;
+};
+
 export type DbCore<T> = {
   // The SQL table name passed to createDbCore. Exposed because joins need
   // to reach through `JoinSpec.table` (a DbCore reference) to emit the
   // joined-table identifier; also useful for introspection.
   readonly tableName: string;
   select: SelectFn<T>;
+  // Paginated select + total count in one call. Runs select() and count()
+  // in parallel over the same where/join (count drops limit/offset).
+  selectWithCount: SelectWithCountFn<T>;
   count: (options?: CountOptions<T>) => Promise<number>;
   insert: (values: Partial<T>) => Promise<T>;
   update: (options: UpdateOptions<T>) => Promise<T[]>;
@@ -217,19 +252,21 @@ export function createDbCore<T>(db: Database, table: string): DbCore<T> {
 
   const supportsReturn = dialect.returningStrategy !== 'none';
 
-  // The implementation has a single signature; the overloads on SelectFn
-  // narrow the return type at the call site based on whether columns/join
-  // are given. The internal `SelectInput<T>` widens the options to include
-  // `join?` so the runtime can read it; the cast to `SelectFn<T>` restores
-  // the multi-overload public type.
-  const select = (async (options?: SelectInput<T>) => {
+  // The single-signature implementation is shared between `select` and
+  // `selectWithCount`. The overloads on SelectFn/SelectWithCountFn narrow
+  // the return type at the call site; `SelectInput<T>` widens options to
+  // include `join?` so the runtime can read it. Casts at assignment
+  // restore each public multi-overload type.
+  const doSelect = async (options?: SelectInput<T>) => {
     const joins = options?.join;
     if (joins) assertJoinColumns(joins);
     const { sql, params } = buildSelect<T>(table, dialect, options);
     const result = await driver.query<Record<string, unknown>>(sql, params);
     if (!joins) return result.rows as unknown as T[];
     return result.rows.map((r) => nestJoinedRow(r, joins));
-  }) as SelectFn<T>;
+  };
+
+  const select = doSelect as unknown as SelectFn<T>;
 
   const count = async (options?: CountOptions<T>): Promise<number> => {
     const { sql, params } = buildCount<T>(table, dialect, options);
@@ -237,6 +274,23 @@ export function createDbCore<T>(db: Database, table: string): DbCore<T> {
     // pg returns COUNT(*) as a bigint string; coerce so consumers get a number.
     return Number(result.rows[0]?.count ?? 0);
   };
+
+  const selectWithCount = (async (options?: SelectInput<T>) => {
+    // The count must reflect the unpaginated set, so drop limit/offset.
+    // where + join are preserved so the count matches the rows' filter.
+    // Cast on `join`: the internal SelectInput widens it to AnyJoin<any>
+    // for the runtime path; the value originally came in through a typed
+    // SelectFn overload constrained to AnyJoin<T>, so the cast is sound.
+    const countOpts: CountOptions<T> = {
+      where: options?.where,
+      join: options?.join as CountOptions<T>['join'],
+    };
+    const [rows, total] = await Promise.all([
+      doSelect(options),
+      count(countOpts),
+    ]);
+    return { rows, total };
+  }) as unknown as SelectWithCountFn<T>;
 
   const insert = async (values: Partial<T>): Promise<T> => {
     const { sql, params } = buildInsert<T>(
@@ -276,6 +330,7 @@ export function createDbCore<T>(db: Database, table: string): DbCore<T> {
   return {
     tableName: table,
     select,
+    selectWithCount,
     count,
     insert,
     update,

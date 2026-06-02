@@ -466,6 +466,115 @@ describe('buildSelect with joins', () => {
     ).toThrow(/join 'select\.columns' cannot be empty/);
   });
 
+  it('paginated join wraps the outer table in a subquery (LIMIT only)', () => {
+    expect(
+      buildSelect<Row>('users', pgDialect, {
+        columns: ['id', 'name'],
+        where: { active: true },
+        join: {
+          table: orders,
+          type: 'left',
+          alias: 'o',
+          on: ['id', 'userId'],
+          select: { columns: ['id', 'total'], where: { status: 'paid' } },
+        },
+        limit: 10,
+      }),
+    ).toEqual({
+      sql:
+        'SELECT "page"."id", "page"."name", "o"."id" AS "o.id", "o"."total" AS "o.total" ' +
+        'FROM (SELECT * FROM "users" WHERE "active" = $1 LIMIT 10) AS "page" ' +
+        'LEFT JOIN "orders" AS "o" ON "page"."id" = "o"."userId" AND "o"."status" = $2',
+      params: [true, 'paid'],
+    });
+  });
+
+  it('paginated join honors OFFSET as well as LIMIT', () => {
+    const out = buildSelect<Row>('users', pgDialect, {
+      columns: ['id'],
+      join: {
+        table: orders,
+        alias: 'o',
+        on: ['id', 'userId'],
+        select: { columns: ['id'] },
+      },
+      limit: 10,
+      offset: 20,
+    });
+    expect(out.sql).toContain('(SELECT * FROM "users" LIMIT 10 OFFSET 20) AS "page"');
+    expect(out.sql).toContain('"page"."id" = "o"."userId"');
+  });
+
+  it('paginated join applies ORDER BY both inside (pagination) and outside (result ordering)', () => {
+    const out = buildSelect<Row>('users', pgDialect, {
+      columns: ['id'],
+      join: {
+        table: orders,
+        alias: 'o',
+        on: ['id', 'userId'],
+        select: { columns: ['id'] },
+      },
+      orderBy: { col: 'id', direction: 'desc' },
+      limit: 5,
+    });
+    // Inner ORDER BY drives the pagination.
+    expect(out.sql).toContain('ORDER BY "id" DESC LIMIT 5');
+    // Outer ORDER BY keeps the post-join result rows in the same outer order.
+    expect(out.sql.endsWith('ORDER BY "page"."id" DESC')).toBe(true);
+  });
+
+  it('paginated join with no outer columns falls back to page.*', () => {
+    const out = buildSelect<Row>('users', pgDialect, {
+      join: {
+        table: orders,
+        alias: 'o',
+        on: ['id', 'userId'],
+        select: { columns: ['id'] },
+      },
+      limit: 5,
+    });
+    expect(out.sql.startsWith('SELECT "page".*, "o"."id" AS "o.id" FROM')).toBe(
+      true,
+    );
+  });
+
+  it('paginated join on mssql injects the synthetic ORDER BY inside the subquery', () => {
+    // OFFSET/FETCH requires ORDER BY; the inner subquery is what paginates,
+    // so the synthetic order goes there — not on the outer SELECT.
+    const out = buildSelect<Row>('users', mssqlDialect, {
+      columns: ['id'],
+      join: {
+        table: orders,
+        alias: 'o',
+        on: ['id', 'userId'],
+        select: { columns: ['id'] },
+      },
+      limit: 10,
+      offset: 5,
+    });
+    expect(out.sql).toContain(
+      '(SELECT * FROM [users] ORDER BY (SELECT NULL) OFFSET 5 ROWS FETCH NEXT 10 ROWS ONLY) AS [page]',
+    );
+  });
+
+  it('paginated join threads placeholders: outer WHERE first, then join WHERE', () => {
+    const out = buildSelect<Row>('users', pgDialect, {
+      columns: ['id'],
+      where: { active: true },
+      join: {
+        table: orders,
+        alias: 'o',
+        on: ['id', 'userId'],
+        select: { columns: ['id'], where: { status: 'paid' } },
+      },
+      limit: 10,
+    });
+    // Order: outer.where ($1) inside the subquery, then join.where ($2) in ON.
+    expect(out.params).toEqual([true, 'paid']);
+    expect(out.sql).toContain('WHERE "active" = $1 LIMIT 10');
+    expect(out.sql).toContain('AND "o"."status" = $2');
+  });
+
   it('throws on an invalid join type', () => {
     // Cast bypasses the literal-union check so we can exercise the runtime
     // guard. Consumers writing TypeScript can't actually pass an invalid
