@@ -7,6 +7,11 @@ import {
   buildUpdate,
 } from './sql.js';
 import { mssqlDialect, mysqlDialect, pgDialect } from './dialect.js';
+import type { DbCore } from '../core/dbCore.js';
+
+// Stub DbCore for join targets — buildSelect only reads `tableName`.
+const stubDb = <T>(name: string): DbCore<T> =>
+  ({ tableName: name }) as DbCore<T>;
 
 type Row = {
   id: number;
@@ -195,6 +200,288 @@ describe('buildCount', () => {
     expect(buildCount<Row>('users', mssqlDialect).sql).toBe(
       'SELECT COUNT(*) AS count FROM [users]',
     );
+  });
+
+  it('emits JOIN clauses without projection aliases', () => {
+    type Order = { id: number; userId: number; status: string };
+    const orders = stubDb<Order>('orders');
+    expect(
+      buildCount<Row>('users', pgDialect, {
+        where: { active: true },
+        join: {
+          table: orders,
+          type: 'left',
+          alias: 'o',
+          on: ['id', 'userId'],
+          select: { where: { status: 'paid' } },
+        },
+      }),
+    ).toEqual({
+      sql:
+        'SELECT COUNT(*) AS count FROM "users" ' +
+        'LEFT JOIN "orders" AS "o" ON "users"."id" = "o"."userId" AND "o"."status" = $1 ' +
+        'WHERE "users"."active" = $2',
+      params: ['paid', true],
+    });
+  });
+});
+
+describe('buildSelect with joins', () => {
+  type Order = {
+    id: number;
+    userId: number;
+    total: number;
+    status: string;
+  };
+  type Item = { id: number; orderId: number; sku: string };
+
+  const orders = stubDb<Order>('orders');
+  const items = stubDb<Item>('items');
+
+  it('emits a single INNER join with alias-prefixed projections', () => {
+    expect(
+      buildSelect<Row>('users', pgDialect, {
+        columns: ['id', 'name'],
+        join: {
+          table: orders,
+          alias: 'o',
+          on: ['id', 'userId'],
+          select: { columns: ['id', 'total'] },
+        },
+      }),
+    ).toEqual({
+      sql:
+        'SELECT "users"."id", "users"."name", "o"."id" AS "o.id", "o"."total" AS "o.total" ' +
+        'FROM "users" ' +
+        'INNER JOIN "orders" AS "o" ON "users"."id" = "o"."userId"',
+      params: [],
+    });
+  });
+
+  it('uses <table>.* when outer columns are omitted', () => {
+    const out = buildSelect<Row>('users', pgDialect, {
+      join: {
+        table: orders,
+        alias: 'o',
+        on: ['id', 'userId'],
+        select: { columns: ['id'] },
+      },
+    });
+    expect(out.sql.startsWith('SELECT "users".*, "o"."id" AS "o.id" FROM')).toBe(
+      true,
+    );
+  });
+
+  it('emits LEFT JOIN and AND-s join.where into the ON clause', () => {
+    expect(
+      buildSelect<Row>('users', pgDialect, {
+        columns: ['id'],
+        join: {
+          table: orders,
+          type: 'left',
+          alias: 'o',
+          on: ['id', 'userId'],
+          select: { columns: ['id'], where: { status: 'paid' } },
+        },
+      }),
+    ).toEqual({
+      sql:
+        'SELECT "users"."id", "o"."id" AS "o.id" FROM "users" ' +
+        'LEFT JOIN "orders" AS "o" ON "users"."id" = "o"."userId" AND "o"."status" = $1',
+      params: ['paid'],
+    });
+  });
+
+  it('threads placeholder numbering across join WHERE and outer WHERE', () => {
+    expect(
+      buildSelect<Row>('users', pgDialect, {
+        columns: ['id'],
+        where: { active: true },
+        join: {
+          table: orders,
+          type: 'left',
+          alias: 'o',
+          on: ['id', 'userId'],
+          select: { columns: ['id'], where: { status: 'paid' } },
+        },
+      }).params,
+    ).toEqual(['paid', true]);
+  });
+
+  it('emits multi-column ON pairs joined by AND', () => {
+    expect(
+      buildSelect<Row>('users', pgDialect, {
+        columns: ['id'],
+        join: {
+          table: orders,
+          alias: 'o',
+          on: [
+            ['id', 'userId'],
+            ['id', 'id'],
+          ],
+          select: { columns: ['id'] },
+        },
+      }).sql,
+    ).toBe(
+      'SELECT "users"."id", "o"."id" AS "o.id" FROM "users" ' +
+        'INNER JOIN "orders" AS "o" ON "users"."id" = "o"."userId" AND "users"."id" = "o"."id"',
+    );
+  });
+
+  it('emits nested joins with full alias path in projections, immediate parent in ON', () => {
+    expect(
+      buildSelect<Row>('users', pgDialect, {
+        columns: ['id'],
+        join: {
+          table: orders,
+          alias: 'o',
+          on: ['id', 'userId'],
+          select: {
+            columns: ['id'],
+            join: {
+              table: items,
+              alias: 'it',
+              on: ['id', 'orderId'],
+              select: { columns: ['sku'] },
+            },
+          },
+        },
+      }).sql,
+    ).toBe(
+      'SELECT "users"."id", "o"."id" AS "o.id", "it"."sku" AS "o.it.sku" ' +
+        'FROM "users" ' +
+        'INNER JOIN "orders" AS "o" ON "users"."id" = "o"."userId" ' +
+        'INNER JOIN "items" AS "it" ON "o"."id" = "it"."orderId"',
+    );
+  });
+
+  it('emits multiple parallel joins (array form)', () => {
+    expect(
+      buildSelect<Row>('users', pgDialect, {
+        columns: ['id'],
+        join: [
+          {
+            table: orders,
+            alias: 'o',
+            on: ['id', 'userId'],
+            select: { columns: ['id'] },
+          },
+          {
+            table: items,
+            type: 'left',
+            alias: 'i',
+            on: ['id', 'orderId'],
+            select: { columns: ['sku'] },
+          },
+        ],
+      }).sql,
+    ).toBe(
+      'SELECT "users"."id", "o"."id" AS "o.id", "i"."sku" AS "i.sku" ' +
+        'FROM "users" ' +
+        'INNER JOIN "orders" AS "o" ON "users"."id" = "o"."userId" ' +
+        'LEFT JOIN "items" AS "i" ON "users"."id" = "i"."orderId"',
+    );
+  });
+
+  it('supports RIGHT and FULL join keywords', () => {
+    const opt = {
+      columns: ['id'] as const,
+      join: {
+        table: orders,
+        alias: 'o' as const,
+        on: ['id', 'userId'] as const,
+        select: { columns: ['id'] as const },
+      },
+    };
+    expect(
+      buildSelect<Row>('users', pgDialect, { ...opt, join: { ...opt.join, type: 'right' } }).sql,
+    ).toContain('RIGHT JOIN');
+    expect(
+      buildSelect<Row>('users', pgDialect, { ...opt, join: { ...opt.join, type: 'full' } }).sql,
+    ).toContain('FULL JOIN');
+  });
+
+  it('quotes identifiers per dialect (mysql backticks)', () => {
+    expect(
+      buildSelect<Row>('users', mysqlDialect, {
+        columns: ['id'],
+        join: {
+          table: orders,
+          alias: 'o',
+          on: ['id', 'userId'],
+          select: { columns: ['id'] },
+        },
+      }).sql,
+    ).toBe(
+      'SELECT `users`.`id`, `o`.`id` AS `o.id` FROM `users` ' +
+        'INNER JOIN `orders` AS `o` ON `users`.`id` = `o`.`userId`',
+    );
+  });
+
+  it('quotes identifiers per dialect (mssql brackets, @p placeholders)', () => {
+    expect(
+      buildSelect<Row>('users', mssqlDialect, {
+        columns: ['id'],
+        join: {
+          table: orders,
+          type: 'left',
+          alias: 'o',
+          on: ['id', 'userId'],
+          select: { columns: ['id'], where: { status: 'paid' } },
+        },
+      }),
+    ).toEqual({
+      sql:
+        'SELECT [users].[id], [o].[id] AS [o.id] FROM [users] ' +
+        'LEFT JOIN [orders] AS [o] ON [users].[id] = [o].[userId] AND [o].[status] = @p1',
+      params: ['paid'],
+    });
+  });
+
+  it('throws when a join supplies an empty on array', () => {
+    expect(() =>
+      buildSelect<Row>('users', pgDialect, {
+        columns: ['id'],
+        join: {
+          table: orders,
+          alias: 'o',
+          on: [] as unknown as readonly [string, string],
+          select: { columns: ['id'] },
+        },
+      }),
+    ).toThrow(/join 'on' cannot be empty/);
+  });
+
+  it('throws when a join supplies an empty columns array', () => {
+    expect(() =>
+      buildSelect<Row>('users', pgDialect, {
+        columns: ['id'],
+        join: {
+          table: orders,
+          alias: 'o',
+          on: ['id', 'userId'],
+          select: { columns: [] },
+        },
+      }),
+    ).toThrow(/join 'select\.columns' cannot be empty/);
+  });
+
+  it('throws on an invalid join type', () => {
+    // Cast bypasses the literal-union check so we can exercise the runtime
+    // guard. Consumers writing TypeScript can't actually pass an invalid
+    // type because the JoinType union narrows it at the call site.
+    expect(() =>
+      buildSelect<Row>('users', pgDialect, {
+        columns: ['id'],
+        join: {
+          table: orders,
+          type: 'cross' as 'inner',
+          alias: 'o',
+          on: ['id', 'userId'],
+          select: { columns: ['id'] },
+        },
+      }),
+    ).toThrow(/invalid join type "cross"/);
   });
 });
 

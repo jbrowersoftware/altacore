@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.3] - 2026-05-13
+
+### Added
+
+- Typed `join` option on `select()` and `count()`. A `JoinSpec` carries `table`, `type` (`'inner'` (default) | `'left'` | `'right'` | `'full'`), `alias`, `on` (single tuple or array of tuples for multi-column ON), and a nested `select` describing the joined-table projection, filters, and further nested joins. `join` accepts either one `JoinSpec` or an array.
+- Result rows are nested by alias: each join contributes `{ [alias]: <projected joined row> }`. LEFT/FULL joins with no match leave the slot as `undefined` (detected by all-joined-columns-undefined).
+- Const-typed generic overloads on `SelectFn<T>` preserve literal `alias` / `type` / `select.columns` inference end-to-end, so consumers get exact nested return types without `as const`.
+- `where` inside a join's `select` is AND-ed into the SQL `ON` clause (not the outer `WHERE`), preserving LEFT/FULL semantics. The README's "Joining tables" section documents the trap this avoids.
+- `DbCore<T>` now exposes `readonly tableName: string` (the SQL identifier passed at creation) so joins can reach through the `JoinSpec.table` reference; also useful for introspection.
+- New public type exports: `JoinType`, `OnPair`, `OnSpec`, `JoinSelect`, `JoinSpec`, `AnyJoin`.
+
+### Changed
+
+- `buildWhere` accepts an optional `qualifier` parameter that prefixes column refs with `"<table>"."<col>"`. No behavior change for single-table callers.
+
 ## [0.0.2] - 2026-05-13
 
 ### Added

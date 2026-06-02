@@ -158,4 +158,111 @@ describe('createDbCore', () => {
     expect(calls[0]?.sql).toBe('UPDATE `things` SET `name` = ? WHERE `id` = ?');
     expect(out).toEqual([]);
   });
+
+  it('select with a single join nests joined columns under the alias', async () => {
+    type Order = { id: number; userId: number; total: number };
+    const { db, calls } = makeFakeDb(
+      [
+        { id: 1, name: 'A', age: 30, 'o.id': 10, 'o.total': 100 },
+        { id: 2, name: 'B', age: 31, 'o.id': 12, 'o.total': 200 },
+      ],
+      2,
+    );
+    const things = createDbCore<Row>(db, 'things');
+    const orders = createDbCore<Order>(db, 'orders');
+
+    const out = await things.select({
+      columns: ['id', 'name'],
+      join: {
+        table: orders,
+        alias: 'o',
+        on: ['id', 'userId'],
+        select: { columns: ['id', 'total'] },
+      },
+    });
+
+    expect(calls[0]?.sql).toBe(
+      'SELECT "things"."id", "things"."name", "o"."id" AS "o.id", "o"."total" AS "o.total" ' +
+        'FROM "things" ' +
+        'INNER JOIN "orders" AS "o" ON "things"."id" = "o"."userId"',
+    );
+    expect(out).toEqual([
+      { id: 1, name: 'A', age: 30, o: { id: 10, total: 100 } },
+      { id: 2, name: 'B', age: 31, o: { id: 12, total: 200 } },
+    ]);
+  });
+
+  it('LEFT join with no match sets the joined slot to undefined', async () => {
+    type Order = { id: number; userId: number; total: number };
+    // Carol has no order — joined cols come back undefined (post null-normalization)
+    const { db } = makeFakeDb(
+      [
+        { id: 1, name: 'A', age: 30, 'o.id': 10, 'o.total': 100 },
+        { id: 3, name: 'Carol', age: 32, 'o.id': undefined, 'o.total': undefined },
+      ],
+      2,
+    );
+    const things = createDbCore<Row>(db, 'things');
+    const orders = createDbCore<Order>(db, 'orders');
+
+    const out = await things.select({
+      columns: ['id', 'name'],
+      join: {
+        table: orders,
+        type: 'left',
+        alias: 'o',
+        on: ['id', 'userId'],
+        select: { columns: ['id', 'total'] },
+      },
+    });
+
+    expect(out[0]?.o).toEqual({ id: 10, total: 100 });
+    expect(out[1]?.o).toBeUndefined();
+  });
+
+  it('select() throws when a join is missing select.columns', async () => {
+    type Order = { id: number; userId: number };
+    const { db } = makeFakeDb([], 0);
+    const things = createDbCore<Row>(db, 'things');
+    const orders = createDbCore<Order>(db, 'orders');
+
+    await expect(
+      things.select({
+        join: {
+          table: orders,
+          alias: 'o',
+          on: ['id', 'userId'],
+        },
+      }),
+    ).rejects.toThrow(/Missing or empty columns on alias "o"/);
+  });
+
+  it('count with join emits joined COUNT(*) and returns the number', async () => {
+    type Order = { id: number; userId: number; status: string };
+    const { db, calls } = makeFakeDb([{ count: 5 }], 1);
+    const things = createDbCore<Row>(db, 'things');
+    const orders = createDbCore<Order>(db, 'orders');
+
+    const n = await things.count({
+      join: {
+        table: orders,
+        alias: 'o',
+        on: ['id', 'userId'],
+        select: { where: { status: 'paid' } },
+      },
+    });
+
+    expect(calls[0]?.sql).toBe(
+      'SELECT COUNT(*) AS count FROM "things" ' +
+        'INNER JOIN "orders" AS "o" ON "things"."id" = "o"."userId" AND "o"."status" = $1',
+    );
+    expect(calls[0]?.params).toEqual(['paid']);
+    expect(n).toBe(5);
+  });
+
+  it('reads the joined table name from DbCore.tableName', () => {
+    const { db } = makeFakeDb([], 0);
+    const orders = createDbCore<{ id: number }>(db, 'orders');
+    expect(orders.tableName).toBe('orders');
+  });
 });

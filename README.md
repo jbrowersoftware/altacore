@@ -2,7 +2,7 @@
 
 A lightweight, easy-to-use ORM framework for Node.js applications working with **Microsoft SQL Server**, **MySQL**, and **PostgreSQL**.
 
-> **Status:** pre-1.0, in active development. Working today: typed CRUD via `createDbCore` (select with column projection, count, insert, update, delete), the typed `where` builder, `orderBy`, all three drivers (MSSQL, MySQL, PostgreSQL), row-returning insert/update via `RETURNING` (pg) and `OUTPUT INSERTED.*` (mssql), and connection pool config passthrough.
+> **Status:** pre-1.0, in active development. Working today: typed CRUD via `createDbCore` (select with column projection, count, insert, update, delete), typed joins (inner / left / right / full, multi-column ON, nested joins, array of joins, count over a join) with nested-by-alias result rows, the typed `where` builder, `orderBy`, all three drivers (MSSQL, MySQL, PostgreSQL), row-returning insert/update via `RETURNING` (pg) and `OUTPUT INSERTED.*` (mssql), and connection pool config passthrough.
 
 ## Why Altacore
 
@@ -76,6 +76,25 @@ const activeAdults = await users.count({
   where: { active: true, age: { gte: 18 } },
 });
 
+// JOIN — typed multi-table query with nested-by-alias result rows
+type Order = { id: number; userId: number; total: number; status: string };
+const orders = createDbCore<Order>(db, 'orders');
+
+const usersWithLatestPaidOrder = await users.select({
+  columns: ['id', 'email'],
+  join: {
+    table: orders,
+    type: 'left',
+    alias: 'o',
+    on: ['id', 'userId'],
+    select: {
+      columns: ['id', 'total'],
+      where: { status: 'paid' }, // AND-ed into ON, not outer WHERE
+    },
+  },
+});
+// Each row: { id, email, o: { id, total } | undefined }
+
 // INSERT — returns the inserted row (pg/mssql) or echoes input (mysql)
 const created = await users.insert({
   email: 'a@b.com',
@@ -125,6 +144,180 @@ const active = await users.count({ where: { active: true } });
 ```
 
 PostgreSQL returns `COUNT(*)` as a bigint string at the driver layer; Altacore coerces it so you always get a `number`.
+
+### Joining tables
+
+`select` (and `count`) accept a `join` option — a single `JoinSpec` or an array. Each join contributes `{ [alias]: <projected joined row> }` onto the result. For LEFT/FULL joins with no match, the joined slot is `undefined`.
+
+#### Anatomy of a join
+
+```ts
+type User = { id: number; email: string; tenantId: number };
+type Order = { id: number; userId: number; total: number; status: string };
+
+const users = createDbCore<User>(db, 'users');
+const orders = createDbCore<Order>(db, 'orders');
+
+const out = await users.select({
+  columns: ['id', 'email'],
+  join: {
+    table: orders, // DbCore<R> reference — the target of the join
+    type: 'left', // 'inner' (default) | 'left' | 'right' | 'full'
+    alias: 'o', // names the nested key in each row
+    on: ['id', 'userId'], // [outerCol, joinedCol]
+    select: {
+      columns: ['id', 'total'], // required — projects the joined row
+      where: { status: 'paid' }, // AND-ed into the ON clause (see below)
+    },
+  },
+});
+// out: Array<{ id: number; email: string; o: { id: number; total: number } | undefined }>
+```
+
+The return type is computed end-to-end — column projection narrows the joined row to `Pick<R, K>`, the alias becomes a literal key on the result, and LEFT/FULL widens the joined slot to `| undefined`.
+
+#### Multi-column ON
+
+Pass an array of pairs; they AND together inside the ON clause.
+
+```ts
+join: {
+  table: orders,
+  alias: 'o',
+  on: [
+    ['id', 'userId'],
+    ['tenantId', 'tenantId'],
+  ],
+  select: { columns: ['id'] },
+}
+// ON "users"."id" = "o"."userId" AND "users"."tenantId" = "o"."tenantId"
+```
+
+#### `where` inside `join.select` lands in the ON clause — not the outer WHERE
+
+This is the single most important thing to internalize. `select.where` on a join is AND-ed into the SQL `ON` clause, **not** appended to the outer `WHERE`. The choice exists to preserve LEFT/FULL join semantics.
+
+Setup:
+
+```ts
+// users:  [{ id: 1, name: 'Alice' }, { id: 2, name: 'Bob' }, { id: 3, name: 'Carol' }]
+// orders: [
+//   { id: 10, userId: 1, total: 100, status: 'paid' },
+//   { id: 11, userId: 1, total: 50,  status: 'pending' },
+//   { id: 12, userId: 2, total: 200, status: 'paid' },
+//   // Carol has no orders
+// ]
+
+await users.select({
+  join: {
+    table: orders,
+    type: 'left',
+    alias: 'o',
+    on: ['id', 'userId'],
+    select: { columns: ['id', 'total'], where: { status: 'paid' } },
+  },
+});
+```
+
+Emitted SQL:
+
+```sql
+SELECT ...
+FROM "users"
+LEFT JOIN "orders" AS "o"
+  ON "users"."id" = "o"."userId"
+  AND "o"."status" = $1
+```
+
+Result — **Carol is preserved**:
+
+```ts
+[
+  { id: 1, name: 'Alice', o: { id: 10, total: 100 } },
+  { id: 2, name: 'Bob',   o: { id: 12, total: 200 } },
+  { id: 3, name: 'Carol', o: undefined },
+]
+```
+
+The footgun this prevents: if the predicate landed in outer WHERE instead (`WHERE o.status = 'paid'`), `o.status` would be `NULL` for Carol, `NULL = 'paid'` evaluates to `UNKNOWN`, and the WHERE drops her — silently converting the LEFT JOIN into an INNER JOIN. Altacore picks the ON placement so the type of join you wrote is the type of join you get.
+
+When you actually want "only users who have ≥1 paid order" (i.e., drop Carol), switch the join to `type: 'inner'` — that makes the intent legible at the call site.
+
+#### Nested joins
+
+Recurse via `select.join`. The nested join's ON references the immediate parent's alias; result keys follow the full alias path.
+
+```ts
+await users.select({
+  columns: ['id', 'email'],
+  join: {
+    table: orders,
+    alias: 'o',
+    on: ['id', 'userId'],
+    select: {
+      columns: ['id', 'total'],
+      join: {
+        table: items,
+        alias: 'it',
+        on: ['id', 'orderId'],
+        select: { columns: ['sku'] },
+      },
+    },
+  },
+});
+// Each row: { id, email, o: { id, total, it: { sku } } }
+```
+
+#### Multiple parallel joins
+
+`join` accepts an array. Each element is an independent join off the outer table.
+
+```ts
+await users.select({
+  columns: ['id'],
+  join: [
+    {
+      table: orders,
+      alias: 'o',
+      on: ['id', 'userId'],
+      select: { columns: ['total'] },
+    },
+    {
+      table: profile,
+      alias: 'p',
+      type: 'left',
+      on: ['id', 'userId'],
+      select: { columns: ['bio'] },
+    },
+  ],
+});
+// Each row: { id, o: { total }, p: { bio } | undefined }
+```
+
+#### `count` with joins
+
+`count()` accepts the same `join` shape. Projections are ignored — only the JOIN/ON/WHERE structure affects the count.
+
+```ts
+const paidUsers = await users.count({
+  join: {
+    table: orders,
+    alias: 'o',
+    on: ['id', 'userId'],
+    select: { where: { status: 'paid' } }, // columns can be omitted here
+  },
+});
+// SELECT COUNT(*) FROM users INNER JOIN orders o ON ... AND o.status = $1
+```
+
+Note: `COUNT(*)` over a join counts joined rows. A user with three paid orders contributes three to the count — same as raw SQL.
+
+#### Constraints and gotchas
+
+- **`select.columns` is required on every join used with `select()`.** The SQL builder needs the column list to emit alias-qualified projections (`"o"."id" AS "o.id"`) so the result mapper can nest rows by dotted key. Omitting it throws a clear runtime error. `count()` skips this requirement since it doesn't project.
+- **Outer `where` columns can't reference joined columns yet.** If you need to filter the result set against a joined column, either switch the join to `inner` (if dropping unmatched outer rows is the goal) or wait for a future dotted-key / `having` mechanism.
+- **`orderBy` is outer-only.** Ordering by a joined column isn't expressible in v1.
+- **Don't use column names containing `.`** when joining — the result mapper splits keys on dots to nest. Source columns with literal dots in their names will be misinterpreted.
 
 ### Where clause operators
 
@@ -187,8 +380,8 @@ When you `orderBy` on MSSQL with `limit`/`offset`, your ordering is used directl
 
 ### Per-driver return shapes
 
-- `select(...)` returns `T[]` (or `Pick<T, K>[]` with column projection) on every driver.
-- `count(...)` returns `number` on every driver.
+- `select(...)` returns `T[]` (or `Pick<T, K>[]` with column projection) on every driver. With `join`, rows include a `{ [alias]: <projected joined row> }` slot per join, `| undefined` for LEFT/FULL no-matches.
+- `count(...)` returns `number` on every driver. `join` is accepted and counts the joined result rows.
 - `insert(values: Partial<T>)` returns `T`:
   - **pg** uses `RETURNING *` — the row reflects DB-applied defaults, autogen IDs, and trigger-modified values.
   - **mssql** uses `OUTPUT INSERTED.*` — same.

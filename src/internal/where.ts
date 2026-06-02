@@ -69,6 +69,7 @@ function buildInternal<T>(
   where: Where<T> | undefined,
   dialect: SqlDialect,
   offset: number,
+  qualifier: string | undefined,
 ): BuildOutput {
   if (!where) return { sql: '', params: [], partCount: 0 };
 
@@ -79,6 +80,8 @@ function buildInternal<T>(
     params.push(value);
     return dialect.placeholder(offset + params.length);
   };
+
+  const prefix = qualifier ? `${dialect.quoteIdentifier(qualifier)}.` : '';
 
   for (const [column, condition] of Object.entries(where)) {
     if (condition === undefined) continue;
@@ -91,7 +94,12 @@ function buildInternal<T>(
       }
       const branchSqls: string[] = [];
       for (const branch of condition as readonly Where<T>[]) {
-        const sub = buildInternal(branch, dialect, offset + params.length);
+        const sub = buildInternal(
+          branch,
+          dialect,
+          offset + params.length,
+          qualifier,
+        );
         if (!sub.sql) continue;
         params.push(...sub.params);
         // A branch that is itself a multi-part AND must be parenthesized
@@ -106,7 +114,7 @@ function buildInternal<T>(
       continue;
     }
 
-    const col = dialect.quoteIdentifier(column);
+    const col = `${prefix}${dialect.quoteIdentifier(column)}`;
 
     if (isOperatorObject(condition)) {
       const keys = Object.keys(condition);
@@ -170,9 +178,15 @@ export function buildWhere<T>(
   where: Where<T> | undefined,
   dialect: SqlDialect,
   // Offset for placeholder numbering — lets a WHERE clause be appended after
-  // an existing parameter list (e.g. UPDATE's SET clause).
+  // an existing parameter list (e.g. UPDATE's SET clause, or after a JOIN's
+  // ON-AND predicates).
   offset = 0,
+  // Optional table/alias name to prefix every column reference with. Used
+  // by the join builder so outer-table refs become `"users"."col"` and
+  // joined-table refs become `"<alias>"."col"`. When omitted, column refs
+  // are emitted unqualified (existing single-table behavior).
+  qualifier?: string,
 ): WhereSql {
-  const r = buildInternal(where, dialect, offset);
+  const r = buildInternal(where, dialect, offset, qualifier);
   return { sql: r.sql, params: r.params };
 }
