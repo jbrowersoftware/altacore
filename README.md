@@ -397,6 +397,53 @@ Note: `COUNT(*)` over a join counts joined rows. A user with three paid orders c
 - **Don't use column names containing `.`** when joining — the result mapper splits keys on dots to nest. Source columns with literal dots in their names will be misinterpreted.
 - **1:N joins still duplicate outer rows in the result.** Altacore's nested-by-alias result shape carries a single joined row per alias slot, so a 1:N join produces multiple result rows that share an outer row (each pairing it with a different joined match). Pagination correctly limits **outer rows** in the subquery, but `result.length` can exceed your page size when 1:N expands. For the same reason, `count()` (and `selectWithCount`'s `total`) counts join-result rows, not distinct outer rows. If your domain is genuinely 1:N and you need array-shaped joined data, that's not modeled in v1. (Aggregating the 1:N side — e.g. `COUNT DISTINCT` or `STRING_AGG` with `groupBy` — collapses it back to one row per group; see [Grouping and aggregates](#grouping-and-aggregates).)
 
+### Hydrating related records
+
+Hydration fetches **single related records reached through an FK on the outer table** (many-to-one / one-to-one) without writing a join. Declare the relations once on the core — a second type parameter maps each hydration key to the row type it resolves to, and a matching runtime spec says which table and columns to follow:
+
+```ts
+type Org = { id: number; name: string };
+type User = { id: number; email: string; orgId: number; managerId?: number };
+
+// Keys → related row types. Declare a key optional when its FK is nullable.
+type UserHydration = { org: Org; manager?: User };
+
+const orgs = createDbCore<Org>(db, 'orgs');
+const users: DbCore<User, UserHydration> = createDbCore<User, UserHydration>(
+  db,
+  'users',
+  {
+    hydration: {
+      org: { table: orgs, on: ['orgId', 'id'] }, // [fkCol, targetCol]
+      manager: { table: () => users, on: ['managerId', 'id'] }, // thunk: self-reference
+    },
+  },
+);
+```
+
+Then opt in per call with `hydrate`:
+
+```ts
+const out = await users.select({
+  where: { email: { like: '%@example.com' } },
+  hydrate: ['org'],
+});
+// out: Array<User & { org: Org }>
+out[0]?.org.name; // ok
+out[0]?.manager; // type error — 'manager' was not hydrated on this call
+```
+
+How it works:
+
+- After the main query, Altacore issues **one batched lookup per requested key** — `SELECT * FROM orgs WHERE id IN (<distinct FK values>)` — and grafts each match onto its row. No join, so hydration never duplicates or drops outer rows, and it composes with `limit`/`offset`, keyset pagination, joins, and column projections unchanged.
+- Hydrated slots hold the **full related row** and each requested key adds its declared type to the result (`Pick<H, K>`, preserving the optionality you declared in `H`).
+- Rows whose FK is `NULL`, or whose FK has no matching target row, leave the key absent — declare the key optional (`manager?: User`) when that can happen.
+- `table` accepts a `DbCore` or a thunk returning one, so self-referential and mutually-referential tables can be wired regardless of declaration order.
+- `selectWithCount` hydrates `rows` the same way; `total` is unaffected.
+- With a `columns` projection, the FK column must be included — a projected-away FK throws before any SQL runs, as does a `hydrate` key with no configured relation.
+
+**Lists are deliberately not hydrated.** A one-to-many ("the user's orders") is its own call on the child table — `orders.select({ where: { userId: { in: userIds } } })` — or a `groupBy` + aggregate join when you want it collapsed into the parent row.
+
 ### Column references and expressions
 
 Several options (`orderBy`, `groupBy`, keyset keys, aggregate args) accept a **column reference** rather than a bare column name. A reference is one of:

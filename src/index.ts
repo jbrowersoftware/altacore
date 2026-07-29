@@ -12,10 +12,13 @@ export type {
   AnyJoin,
   ColRef,
   CountOptions,
+  CreateDbCoreOptions,
   DbCore,
   DeleteOptions,
   ExistsSpec,
   Expr,
+  HydrationRelation,
+  HydrationSpec,
   JoinSelect,
   JoinSpec,
   JoinType,
@@ -35,4 +38,4 @@ export type {
 
 export type { Driver, DriverFactory, QueryResult } from './drivers/types.js';
 
-export const VERSION = '0.1.1';
+export const VERSION = '0.2.0';

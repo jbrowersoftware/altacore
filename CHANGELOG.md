@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-07-29
+
+### Breaking changes
+
+- **`DbCore`, `SelectFn`, and `SelectWithCountFn` gained a second type parameter `H` (the hydration map), and every `select`/`selectWithCount` overload gained an `HK` type parameter capturing the requested hydrate keys.** All parameters default (`H = {}`, `HK = never`), so every existing call pattern, `DbCore<T>` annotation, and return type is unchanged. Only impact: code that assigns a custom implementation to a variable typed `SelectFn<T>` / `SelectWithCountFn<T>` without handling the widened generics may fail to type-check (same caveat as 0.0.3 / 0.1.0).
+
+### Added
+
+- **Hydration** — fetch single related records reached through an FK (many-to-one / one-to-one) without a join. `createDbCore<T, H>(db, table, { hydration })` declares the relations: `H` maps each hydration key to its related row type; the runtime spec supplies `{ table, on: [fkCol, targetCol] }` per key (`on` uses the same [outer, target] ordering as join/exists pairs). `select({ hydrate: ['org'] })` then issues one batched lookup per requested key (`WHERE target IN (<distinct FK values>)`) after the main query and grafts each match onto its row. Each requested key adds its declared type to the result rows (`Pick<H, K>`, preserving declared optionality).
+  - No join, no row explosion: composes unchanged with `limit`/`offset`, keyset pagination, joins, projections, and `selectWithCount` (which hydrates `rows`; `total` is unaffected).
+  - `table` accepts a `DbCore` or a thunk (`() => core`) so self-referential and mutually-referential tables can be wired regardless of declaration order.
+  - Rows with a `NULL` FK or an unmatched FK leave the key absent — declare the key optional in `H` for nullable FKs. Rows sharing an FK value share the same related object.
+  - Fail-fast validation before any SQL: an unconfigured `hydrate` key, or a `columns` projection that drops the FK column, throws a clear `TypeError`. A hydration key colliding with an existing row property (column or join alias) also throws instead of clobbering.
+  - One-to-many ("lists") is deliberately not modeled — fetch child rows with their own select on the child table, or collapse them with `groupBy` + aggregates.
+- New public type exports: `HydrationRelation`, `HydrationSpec`, `CreateDbCoreOptions`.
+
 ## [0.1.1] - 2026-06-02
 
 ### Fixed

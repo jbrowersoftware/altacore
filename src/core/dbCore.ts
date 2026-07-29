@@ -8,6 +8,11 @@ import {
   type SelectInput,
 } from '../internal/sql.js';
 import { assertJoinColumns, nestJoinedRow } from '../internal/nest.js';
+import {
+  hydrateRows,
+  resolveHydration,
+  type HydrationSpecRuntime,
+} from '../internal/hydrate.js';
 
 export type WhereOperators<V> = {
   // null is always permitted on eq/ne — translated to IS NULL / IS NOT NULL.
@@ -72,6 +77,11 @@ export type Where<T> = ColumnWhere<T> & {
 // `keyof EmptyAliasMap` is `never`, so the joined-ref branch of ColRef
 // collapses to `never` and only `{ col }` remains.
 type EmptyAliasMap = Record<never, never>;
+
+// Default for the hydration map H (createDbCore's second type parameter) —
+// same empty-record identity trick: `keyof NoHydration` is `never`, so the
+// `hydrate` option accepts nothing and contributes nothing to the row type.
+type NoHydration = Record<never, never>;
 
 export type ColRef<T, M = EmptyAliasMap> =
   | { col: keyof T & string }
@@ -287,6 +297,48 @@ export type DeleteOptions<T> = {
   where: Where<T>;
 };
 
+// -----------------------------------------------------------------------------
+// Hydration
+// -----------------------------------------------------------------------------
+// H (createDbCore's second type parameter) maps hydration keys to the row
+// types they resolve to — single related records reached through an FK on
+// this table (many-to-one / one-to-one). One-to-many ("lists") is deliberately
+// not modeled: fetch child rows with their own select on the child table.
+//
+// Each key declared in H needs a runtime relation in createDbCore's
+// `hydration` option. `on` is `[fkCol, targetCol]` — [outer, target], the
+// same ordering as join/exists `on` pairs. `table` may be a thunk
+// (`() => core`) so self-referential and mutually-referential tables can be
+// wired regardless of declaration order.
+//
+// select({ hydrate: ['org'] }) batches ONE lookup per requested key
+// (`WHERE target IN (<distinct FK values>)`) after the main query and grafts
+// each match onto its row — no join, no row explosion; composes with
+// limit/offset, keyset, joins, and projections (the FK column must survive a
+// `columns` projection). Rows whose FK is NULL, or whose FK has no match,
+// leave the key absent — declare the key optional in H when the FK is
+// nullable.
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+// `any` for the related core's own hydration map: whether the target table
+// declares hydration of its own is irrelevant to this relation, and pinning
+// it would reject such cores (DbCore is invariant in its parameters).
+export type HydrationRelation<T, R> = {
+  table: DbCore<R, any> | (() => DbCore<R, any>);
+  on: OnPair<T, R>;
+};
+/* eslint-enable @typescript-eslint/no-explicit-any */
+
+// `-?` so an optional declaration (`org?: Org` — nullable FK) still requires
+// its relation to be configured.
+export type HydrationSpec<T, H> = {
+  [K in keyof H]-?: HydrationRelation<T, NonNullable<H[K]>>;
+};
+
+export type CreateDbCoreOptions<T, H> = {
+  hydration?: HydrationSpec<T, H>;
+};
+
 // Overload ordering is significant — TS picks the first matching signature.
 // Join-bearing overloads come first so they win when `join` is present;
 // when absent, control falls through to the column-projection and bare-T[]
@@ -296,67 +348,89 @@ export type DeleteOptions<T> = {
 // `alias: 'o'` widens to `string` (producing index-signature rows) and
 // `select.columns: ['id', ...]` widens to `string[]` (collapsing the
 // projected Pick to `never`).
-export type SelectFn<T> = {
+export type SelectFn<T, H = NoHydration> = {
   // Single join object. `AliasMapOf<J>` is threaded into the options so
   // orderBy/groupBy/keyset/aggregate refs can target the joined alias by name.
-  // `A` captures the aggregates tuple so each `as` becomes a typed row key.
+  // `A` captures the aggregates tuple so each `as` becomes a typed row key;
+  // `HK` captures the requested hydrate keys so each contributes its declared
+  // related-row type (`Pick<H, HK>`, preserving optionality declared in H).
   <
     K extends keyof T & string,
     const J extends AnyJoin<T>,
     const A extends readonly Aggregate<T, AliasMapOf<J>>[] = readonly [],
+    HK extends keyof H & string = never,
   >(
     options: SelectOptions<T, AliasMapOf<J>> & {
       columns?: readonly K[];
       join: J;
       aggregates?: A;
+      hydrate?: readonly HK[];
     },
-  ): Promise<Array<OuterRow<T, K> & JoinAliasEntry<J> & AggregateOut<T, A>>>;
+  ): Promise<
+    Array<OuterRow<T, K> & JoinAliasEntry<J> & AggregateOut<T, A> & Pick<H, HK>>
+  >;
 
   // Array of joins.
   <
     K extends keyof T & string,
     const J extends readonly AnyJoin<T>[],
     const A extends readonly Aggregate<T, AliasMapOf<J>>[] = readonly [],
+    HK extends keyof H & string = never,
   >(
     options: SelectOptions<T, AliasMapOf<J>> & {
       columns?: readonly K[];
       join: J;
       aggregates?: A;
+      hydrate?: readonly HK[];
     },
-  ): Promise<Array<OuterRow<T, K> & AllJoinEntries<J> & AggregateOut<T, A>>>;
+  ): Promise<
+    Array<OuterRow<T, K> & AllJoinEntries<J> & AggregateOut<T, A> & Pick<H, HK>>
+  >;
 
   // No-join, with column projection.
   <
     K extends keyof T & string,
     const A extends readonly Aggregate<T>[] = readonly [],
+    HK extends keyof H & string = never,
   >(
-    options: SelectOptions<T> & { columns: readonly K[]; aggregates?: A },
-  ): Promise<Array<Pick<T, K> & AggregateOut<T, A>>>;
+    options: SelectOptions<T> & {
+      columns: readonly K[];
+      aggregates?: A;
+      hydrate?: readonly HK[];
+    },
+  ): Promise<Array<Pick<T, K> & AggregateOut<T, A> & Pick<H, HK>>>;
 
   // No-join, no projection.
-  <const A extends readonly Aggregate<T>[] = readonly []>(
-    options?: SelectOptions<T> & { aggregates?: A },
-  ): Promise<Array<T & AggregateOut<T, A>>>;
+  <
+    const A extends readonly Aggregate<T>[] = readonly [],
+    HK extends keyof H & string = never,
+  >(
+    options?: SelectOptions<T> & { aggregates?: A; hydrate?: readonly HK[] },
+  ): Promise<Array<T & AggregateOut<T, A> & Pick<H, HK>>>;
 };
 
 // Mirrors SelectFn<T> but wraps each row array in `{ rows; total }`. `total`
 // is the count of rows matching the same where/join with limit/offset
 // dropped — for 1:0..1 joins it equals the outer-row count; for 1:N joins
 // it counts join-result rows (same as count() over a join).
-export type SelectWithCountFn<T> = {
+export type SelectWithCountFn<T, H = NoHydration> = {
   // Single join object.
   <
     K extends keyof T & string,
     const J extends AnyJoin<T>,
     const A extends readonly Aggregate<T, AliasMapOf<J>>[] = readonly [],
+    HK extends keyof H & string = never,
   >(
     options: SelectOptions<T, AliasMapOf<J>> & {
       columns?: readonly K[];
       join: J;
       aggregates?: A;
+      hydrate?: readonly HK[];
     },
   ): Promise<{
-    rows: Array<OuterRow<T, K> & JoinAliasEntry<J> & AggregateOut<T, A>>;
+    rows: Array<
+      OuterRow<T, K> & JoinAliasEntry<J> & AggregateOut<T, A> & Pick<H, HK>
+    >;
     total: number;
   }>;
 
@@ -365,14 +439,18 @@ export type SelectWithCountFn<T> = {
     K extends keyof T & string,
     const J extends readonly AnyJoin<T>[],
     const A extends readonly Aggregate<T, AliasMapOf<J>>[] = readonly [],
+    HK extends keyof H & string = never,
   >(
     options: SelectOptions<T, AliasMapOf<J>> & {
       columns?: readonly K[];
       join: J;
       aggregates?: A;
+      hydrate?: readonly HK[];
     },
   ): Promise<{
-    rows: Array<OuterRow<T, K> & AllJoinEntries<J> & AggregateOut<T, A>>;
+    rows: Array<
+      OuterRow<T, K> & AllJoinEntries<J> & AggregateOut<T, A> & Pick<H, HK>
+    >;
     total: number;
   }>;
 
@@ -380,25 +458,39 @@ export type SelectWithCountFn<T> = {
   <
     K extends keyof T & string,
     const A extends readonly Aggregate<T>[] = readonly [],
+    HK extends keyof H & string = never,
   >(
-    options: SelectOptions<T> & { columns: readonly K[]; aggregates?: A },
-  ): Promise<{ rows: Array<Pick<T, K> & AggregateOut<T, A>>; total: number }>;
+    options: SelectOptions<T> & {
+      columns: readonly K[];
+      aggregates?: A;
+      hydrate?: readonly HK[];
+    },
+  ): Promise<{
+    rows: Array<Pick<T, K> & AggregateOut<T, A> & Pick<H, HK>>;
+    total: number;
+  }>;
 
   // No-join, no projection.
-  <const A extends readonly Aggregate<T>[] = readonly []>(
-    options?: SelectOptions<T> & { aggregates?: A },
-  ): Promise<{ rows: Array<T & AggregateOut<T, A>>; total: number }>;
+  <
+    const A extends readonly Aggregate<T>[] = readonly [],
+    HK extends keyof H & string = never,
+  >(
+    options?: SelectOptions<T> & { aggregates?: A; hydrate?: readonly HK[] },
+  ): Promise<{
+    rows: Array<T & AggregateOut<T, A> & Pick<H, HK>>;
+    total: number;
+  }>;
 };
 
-export type DbCore<T> = {
+export type DbCore<T, H = NoHydration> = {
   // The SQL table name passed to createDbCore. Exposed because joins need
   // to reach through `JoinSpec.table` (a DbCore reference) to emit the
   // joined-table identifier; also useful for introspection.
   readonly tableName: string;
-  select: SelectFn<T>;
+  select: SelectFn<T, H>;
   // Paginated select + total count in one call. Runs select() and count()
   // in parallel over the same where/join (count drops limit/offset).
-  selectWithCount: SelectWithCountFn<T>;
+  selectWithCount: SelectWithCountFn<T, H>;
   count: (options?: CountOptions<T>) => Promise<number>;
   insert: (values: Partial<T>) => Promise<T>;
   update: (options: UpdateOptions<T>) => Promise<T[]>;
@@ -426,9 +518,23 @@ function coerceNumericAggregates(
   }
 }
 
-export function createDbCore<T>(db: Database, table: string): DbCore<T> {
+// `hydrate` rides through the runtime select path alongside the SQL-building
+// fields; the builders never read it. Same widening rationale as SelectInput.
+type SelectRuntimeInput<T> = SelectInput<T> & { hydrate?: readonly string[] };
+
+export function createDbCore<T, H = NoHydration>(
+  db: Database,
+  table: string,
+  coreOptions?: CreateDbCoreOptions<T, H>,
+): DbCore<T, H> {
   const driver = db.driver;
   const dialect = driver.dialect;
+
+  // Widen the typed spec for the structural runtime walk (keyof H is a
+  // string union, so the keys line up; only the value types loosen).
+  const hydrationSpec = coreOptions?.hydration as
+    | HydrationSpecRuntime
+    | undefined;
 
   const supportsReturn = dialect.returningStrategy !== 'none';
 
@@ -437,7 +543,15 @@ export function createDbCore<T>(db: Database, table: string): DbCore<T> {
   // the return type at the call site; `SelectInput<T>` widens options to
   // include `join?` so the runtime can read it. Casts at assignment
   // restore each public multi-overload type.
-  const doSelect = async (options?: SelectInput<T>) => {
+  const doSelect = async (options?: SelectRuntimeInput<T>) => {
+    // Resolve + validate hydration before touching SQL so a bad hydrate key
+    // or a projected-away FK column fails without a round-trip.
+    const hydrations = resolveHydration(
+      table,
+      options?.hydrate,
+      hydrationSpec,
+      options?.columns,
+    );
     const joins = options?.join;
     // Normally every join must project columns. But in an aggregate/grouped
     // query a join may exist purely to feed an aggregate (e.g. STRING_AGG over
@@ -455,10 +569,11 @@ export function createDbCore<T>(db: Database, table: string): DbCore<T> {
     // strings. Coerce those aggregate outputs to numbers (their typed result
     // shape). min/max are left as-is — they preserve the source column type.
     if (options?.aggregates) coerceNumericAggregates(rows, options.aggregates);
+    if (hydrations.length > 0) await hydrateRows(rows, hydrations);
     return rows as unknown as T[];
   };
 
-  const select = doSelect as unknown as SelectFn<T>;
+  const select = doSelect as unknown as SelectFn<T, H>;
 
   const count = async (options?: CountOptions<T>): Promise<number> => {
     const { sql, params } = buildCount<T>(table, dialect, options);
@@ -467,7 +582,7 @@ export function createDbCore<T>(db: Database, table: string): DbCore<T> {
     return Number(result.rows[0]?.count ?? 0);
   };
 
-  const selectWithCount = (async (options?: SelectInput<T>) => {
+  const selectWithCount = (async (options?: SelectRuntimeInput<T>) => {
     // The count must reflect the unpaginated set, so drop limit/offset.
     // where + join are preserved so the count matches the rows' filter.
     // Cast on `join`: the internal SelectInput widens it to AnyJoin<any>
@@ -482,7 +597,7 @@ export function createDbCore<T>(db: Database, table: string): DbCore<T> {
       count(countOpts),
     ]);
     return { rows, total };
-  }) as unknown as SelectWithCountFn<T>;
+  }) as unknown as SelectWithCountFn<T, H>;
 
   const insert = async (values: Partial<T>): Promise<T> => {
     const { sql, params } = buildInsert<T>(

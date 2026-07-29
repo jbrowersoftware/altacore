@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createDbCore } from './dbCore.js';
+import { createDbCore, type DbCore } from './dbCore.js';
 import type { Database, DatabaseDriver } from './database.js';
 import type { Driver, QueryResult } from '../drivers/types.js';
 import { mysqlDialect, pgDialect } from '../internal/dialect.js';
@@ -657,5 +657,215 @@ describe('createDbCore', () => {
     const out = await promise;
     expect(out.total).toBe(99);
     expect(out.rows).toEqual([{ id: 1, name: 'a', age: 30 }]);
+  });
+});
+
+describe('hydration', () => {
+  type Org = { id: number; name: string };
+  type UserRow = {
+    id: number;
+    email: string;
+    orgId?: number;
+    managerId?: number;
+  };
+  type UserHydration = { org?: Org; manager?: UserRow };
+
+  // Queue-based fake: each query consumes the next response, so one db can
+  // serve the main select and a follow-up hydration lookup with different rows.
+  function makeQueueDb(responses: Array<unknown[]>): {
+    db: Database;
+    calls: Captured[];
+  } {
+    const calls: Captured[] = [];
+    const queue = [...responses];
+    const driver: Driver = {
+      kind: 'pg',
+      dialect: pgDialect,
+      query<R>(
+        sql: string,
+        params: readonly unknown[],
+      ): Promise<QueryResult<R>> {
+        calls.push({ sql, params: [...params] });
+        const rows = (queue.shift() ?? []) as R[];
+        return Promise.resolve({ rows, rowCount: rows.length });
+      },
+      async close() {},
+    };
+    return { db: { driver }, calls };
+  }
+
+  function makeCores(userResponses: Array<unknown[]>, orgRows: unknown[]) {
+    const { db: orgDb, calls: orgCalls } = makeFakeDb(orgRows, orgRows.length);
+    const orgs = createDbCore<Org>(orgDb, 'orgs');
+    const { db: userDb, calls: userCalls } = makeQueueDb(userResponses);
+    const users: DbCore<UserRow, UserHydration> = createDbCore<
+      UserRow,
+      UserHydration
+    >(userDb, 'users', {
+      hydration: {
+        org: { table: orgs, on: ['orgId', 'id'] },
+        // Thunk: self-referential relation, resolved at query time.
+        manager: { table: () => users, on: ['managerId', 'id'] },
+      },
+    });
+    return { users, orgs, userCalls, orgCalls };
+  }
+
+  it('select({ hydrate }) batches one deduped lookup and grafts each row', async () => {
+    const { users, userCalls, orgCalls } = makeCores(
+      [
+        [
+          { id: 1, email: 'a@x.com', orgId: 10 },
+          { id: 2, email: 'b@x.com', orgId: 11 },
+          { id: 3, email: 'c@x.com', orgId: 10 },
+          { id: 4, email: 'd@x.com', orgId: undefined },
+        ],
+      ],
+      [
+        { id: 10, name: 'A' },
+        { id: 11, name: 'B' },
+      ],
+    );
+
+    const out = await users.select({ hydrate: ['org'] });
+
+    // Main select untouched by hydration; lookup went to the orgs core.
+    expect(userCalls).toHaveLength(1);
+    expect(userCalls[0]?.sql).toBe('SELECT * FROM "users"');
+    expect(orgCalls).toHaveLength(1);
+    expect(orgCalls[0]?.sql).toBe(
+      'SELECT * FROM "orgs" WHERE "id" IN ($1, $2)',
+    );
+    expect(orgCalls[0]?.params).toEqual([10, 11]); // deduped, first-appearance order
+
+    expect(out[0]?.org).toEqual({ id: 10, name: 'A' });
+    expect(out[1]?.org).toEqual({ id: 11, name: 'B' });
+    expect(out[2]?.org).toEqual({ id: 10, name: 'A' });
+    expect(out[3]?.org).toBeUndefined(); // NULL FK — left absent
+    // Type-level: only the hydrated key lands on the row.
+    void out[0]?.org?.name;
+    // @ts-expect-error 'manager' was not hydrated on this call
+    void out[0]?.manager;
+  });
+
+  it('rows without hydrate never expose hydration keys', async () => {
+    const { users } = makeCores([[{ id: 1, email: 'a@x.com' }]], []);
+    const out = await users.select({});
+    // @ts-expect-error 'org' is only present when hydrated
+    void out[0]?.org;
+    // @ts-expect-error unknown hydrate keys are rejected
+    await users.select({ hydrate: ['bogus'] }).catch(() => {});
+  });
+
+  it('hydrates a self-referential relation through the table thunk', async () => {
+    const { users, userCalls } = makeCores(
+      [
+        [{ id: 1, email: 'a@x.com', managerId: 7 }],
+        [{ id: 7, email: 'boss@x.com', managerId: undefined }],
+      ],
+      [],
+    );
+
+    const out = await users.select({ hydrate: ['manager'] });
+
+    expect(userCalls).toHaveLength(2);
+    expect(userCalls[1]?.sql).toBe('SELECT * FROM "users" WHERE "id" IN ($1)');
+    expect(userCalls[1]?.params).toEqual([7]);
+    expect(out[0]?.manager?.email).toBe('boss@x.com');
+  });
+
+  it('hydrates multiple relations in parallel on one call', async () => {
+    const { users, orgCalls, userCalls } = makeCores(
+      [
+        [{ id: 1, email: 'a@x.com', orgId: 10, managerId: 7 }],
+        [{ id: 7, email: 'boss@x.com' }],
+      ],
+      [{ id: 10, name: 'A' }],
+    );
+
+    const out = await users.select({ hydrate: ['org', 'manager'] });
+
+    expect(orgCalls).toHaveLength(1);
+    expect(userCalls).toHaveLength(2); // main select + manager lookup
+    expect(out[0]?.org?.name).toBe('A');
+    expect(out[0]?.manager?.email).toBe('boss@x.com');
+  });
+
+  it('composes with a columns projection that keeps the FK', async () => {
+    const { users, orgCalls } = makeCores(
+      [[{ id: 1, orgId: 10 }]],
+      [{ id: 10, name: 'A' }],
+    );
+
+    const out = await users.select({
+      columns: ['id', 'orgId'],
+      hydrate: ['org'],
+    });
+
+    expect(orgCalls).toHaveLength(1);
+    expect(out[0]?.org?.name).toBe('A');
+    // @ts-expect-error projected rows do not include unselected columns
+    void out[0]?.email;
+  });
+
+  it('throws before any SQL when a columns projection drops the FK', async () => {
+    const { users, userCalls, orgCalls } = makeCores([], []);
+
+    await expect(
+      users.select({ columns: ['id', 'email'], hydrate: ['org'] }),
+    ).rejects.toThrow(/FK column "orgId", which is not in 'columns'/);
+    expect(userCalls).toHaveLength(0);
+    expect(orgCalls).toHaveLength(0);
+  });
+
+  it('throws before any SQL when hydrate is used without a configured spec', async () => {
+    const { db, calls } = makeQueueDb([]);
+    // H declared but no hydration option passed — compile-time fine,
+    // runtime must fail fast.
+    const users = createDbCore<UserRow, UserHydration>(db, 'users');
+
+    await expect(users.select({ hydrate: ['org'] })).rejects.toThrow(
+      /hydrate key "org" has no relation configured for table "users"/,
+    );
+    expect(calls).toHaveLength(0);
+  });
+
+  it('selectWithCount hydrates the page rows and leaves total intact', async () => {
+    const { users, orgCalls, userCalls } = makeCores(
+      [[{ id: 1, email: 'a@x.com', orgId: 10 }], [{ count: '5' }]],
+      [{ id: 10, name: 'A' }],
+    );
+
+    const { rows, total } = await users.selectWithCount({
+      limit: 1,
+      hydrate: ['org'],
+    });
+
+    expect(total).toBe(5);
+    expect(rows[0]?.org).toEqual({ id: 10, name: 'A' });
+    expect(userCalls).toHaveLength(2); // select + count
+    expect(userCalls[1]?.sql).toContain('COUNT(*)');
+    expect(orgCalls).toHaveLength(1);
+  });
+
+  it('a hydration-enabled core still composes as a join table and exists target', async () => {
+    const { users } = makeCores([[]], []);
+    const { db } = makeFakeDb([], 0);
+    const things = createDbCore<Row>(db, 'things');
+
+    // Compile-time compatibility is the point; both calls must also run.
+    await things.select({
+      columns: ['id'],
+      join: {
+        table: users,
+        type: 'left',
+        alias: 'u',
+        on: ['id', 'id'],
+        select: { columns: ['email'] },
+      },
+    });
+    await things.select({
+      where: { exists: { table: users, on: ['id', 'id'] } },
+    });
   });
 });
