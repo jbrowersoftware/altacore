@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-08-17
+
+### Fixed
+
+- **Single-driver installation now works.** Users can install only the driver they need (e.g., `npm install altacore mssql`) without requiring the other optional drivers (`pg`, `mysql2`) to be installed. Driver packages are now lazy-loaded when a driver is instantiated, not at bundle top-level.
+
 ## [0.2.0] - 2026-07-29
 
 ### Breaking changes
