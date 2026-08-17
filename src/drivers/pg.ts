@@ -6,6 +6,7 @@ export const createPgDriver: DriverFactory = (
   config: DatabaseConfig,
 ): Driver => {
   // Lazy-load pg to avoid requiring it if the driver isn't used
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { Pool } = require('pg') as typeof import('pg');
 
   const pool = new Pool({

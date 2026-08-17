@@ -8,6 +8,7 @@ export const createMysqlDriver: DriverFactory = (
   config: DatabaseConfig,
 ): Driver => {
   // Lazy-load mysql2 to avoid requiring it if the driver isn't used
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { createPool } = require('mysql2/promise') as typeof import('mysql2/promise');
 
   // mysql2 takes pool sizing on the options object, not the URI.

@@ -6,6 +6,7 @@ export const createMssqlDriver: DriverFactory = (
   config: DatabaseConfig,
 ): Driver => {
   // Lazy-load mssql to avoid requiring it if the driver isn't used
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
   const mssql = require('mssql') as typeof import('mssql');
 
   const pool = new mssql.ConnectionPool(config.connectionString);
