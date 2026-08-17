@@ -1,10 +1,53 @@
 {
   "permissions": {
     "allow": [
-      "Edit(CLAUDE.md)",
-      "Edit(src/**)",
-      "Bash(npm test *)",
+      "Read(**)",
+      "Grep",
+      "Glob",
+      "Edit(*)",
+      "Bash(rg:*)",
+      "Bash(cat:*)",
+      "Bash(ls:*)",
+      "Bash(find:*)",
+      "Bash(grep:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(wc:*)",
+      "Bash(git status)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(npm run build)",
+      "Bash(npm run build:*)",
+      "Bash(npm run typecheck)",
+      "Bash(npm run typecheck:*)",
+      "Bash(npm run type-check)",
+      "Bash(npm run type-check:*)",
+      "Bash(npm run lint)",
+      "Bash(npm run lint:*)",
+      "Bash(tsc)",
+      "Bash(tsc *)",
+      "Bash(npx tsc)",
+      "Bash(npx tsc *)",
+      "Bash(ng build)",
+      "Bash(ng build *)",
+      "Bash(ng lint)",
+      "Bash(ng lint *)",
       "Bash(npm run *)"
-    ]
+    ],
+    "deny": [
+      "Bash(npm install*)",
+      "Bash(npm i*)",
+      "Bash(yarn add*)",
+      "Bash(yarn install*)",
+      "Bash(pnpm add*)",
+      "Bash(pnpm install*)",
+      "Bash(pip install*)",
+      "Bash(brew install*)",
+      "Bash(apt*)",
+      "Bash(bash*)",
+      "Bash(sh -c*)"
+    ],
+    "defaultMode": "dontAsk"
   }
 }

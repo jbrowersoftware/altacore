@@ -1,5 +1,3 @@
-import mssql from 'mssql';
-
 import type { DatabaseConfig } from '../core/database.js';
 import { mssqlDialect } from '../internal/dialect.js';
 import type { Driver, DriverFactory, QueryResult } from './types.js';
@@ -7,6 +5,9 @@ import type { Driver, DriverFactory, QueryResult } from './types.js';
 export const createMssqlDriver: DriverFactory = (
   config: DatabaseConfig,
 ): Driver => {
+  // Lazy-load mssql to avoid requiring it if the driver isn't used
+  const mssql = require('mssql') as typeof import('mssql');
+
   const pool = new mssql.ConnectionPool(config.connectionString);
 
   // The connection string is parsed in the constructor; layer pool overrides

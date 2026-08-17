@@ -1,5 +1,3 @@
-import { Pool } from 'pg';
-
 import type { DatabaseConfig } from '../core/database.js';
 import { pgDialect } from '../internal/dialect.js';
 import type { Driver, DriverFactory, QueryResult } from './types.js';
@@ -7,6 +5,9 @@ import type { Driver, DriverFactory, QueryResult } from './types.js';
 export const createPgDriver: DriverFactory = (
   config: DatabaseConfig,
 ): Driver => {
+  // Lazy-load pg to avoid requiring it if the driver isn't used
+  const { Pool } = require('pg') as typeof import('pg');
+
   const pool = new Pool({
     connectionString: config.connectionString,
     max: config.pool?.max,

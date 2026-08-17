@@ -1,4 +1,3 @@
-import { createPool } from 'mysql2/promise';
 import type { PoolOptions, ResultSetHeader } from 'mysql2/promise';
 
 import type { DatabaseConfig } from '../core/database.js';
@@ -8,6 +7,9 @@ import type { Driver, DriverFactory, QueryResult } from './types.js';
 export const createMysqlDriver: DriverFactory = (
   config: DatabaseConfig,
 ): Driver => {
+  // Lazy-load mysql2 to avoid requiring it if the driver isn't used
+  const { createPool } = require('mysql2/promise') as typeof import('mysql2/promise');
+
   // mysql2 takes pool sizing on the options object, not the URI.
   // `min` is intentionally not forwarded — mysql2 has no minimum-idle setting.
   const opts: PoolOptions = { uri: config.connectionString };

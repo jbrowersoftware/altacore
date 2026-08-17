@@ -9,4 +9,5 @@ export default defineConfig({
   target: 'node20',
   outDir: 'dist',
   treeshake: true,
+  external: ['pg', 'mysql2', 'mssql'],
 });
